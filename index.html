@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#03060b">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-src blob:; object-src blob:; base-uri 'none'; form-action 'none'">
+  <meta name="description" content="Личная медицинская база с зашифрованными данными и документами.">
+  <title>Медицинская база</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">К содержимому</a>
+  <section id="lock-screen" class="shell lock-layout" aria-label="Открыть медицинскую базу">
+    <div class="lock-intro">
+      <a class="brand" href="#/home" aria-label="Медицинская база"><span class="brand-mark" aria-hidden="true">+</span><span class="brand-text">HEALTH / ARCHIVE</span></a>
+      <p class="eyebrow">ЛИЧНАЯ МЕДИЦИНСКАЯ БАЗА</p>
+      <h1 class="hero-title">Вся история.<br><span class="accent-cyan">В одном месте.</span></h1>
+      <p class="hero-copy">Разборы проблем, результаты анализов, документы и следующие шаги — в единой системе, которую можно дополнять.</p>
+      <div class="hero-meta"><span>01 / ПРОФИЛИ</span><span>02 / ИССЛЕДОВАНИЯ</span><span>03 / ИСТОРИЯ</span></div>
+    </div>
+    <div class="panel lock-card">
+      <p class="eyebrow accent-cyan">ЗАШИФРОВАННОЕ ХРАНИЛИЩЕ</p>
+      <h2>Открыть базу</h2>
+      <p class="section-note">Введите пароль, чтобы расшифровать записи и документы на этом устройстве.</p>
+      <form id="unlock-form">
+        <label class="field" for="password"><span class="field-label">Пароль доступа</span>
+          <span class="password-wrap"><input class="input" id="password" type="password" autocomplete="off" required spellcheck="false"><button id="password-toggle" type="button" class="icon-button" aria-label="Показать пароль" aria-pressed="false">◉</button></span>
+        </label>
+        <p id="unlock-error" class="form-error" role="alert"></p>
+        <button id="unlock-submit" class="button button-primary full-width" type="submit">Открыть базу <span aria-hidden="true">↗</span></button>
+      </form>
+      <div class="lock-hint">Пароль не отправляется на сервер. Сайт расшифровывает данные в памяти браузера. Не сохраняйте пароль на чужом устройстве.</div>
+      <button id="import-backup" class="button button-secondary full-width" type="button">Открыть резервную копию</button>
+      <input id="import-file" type="file" accept=".json,.healthvault,application/json" hidden>
+      <p id="backup-selection" class="section-note" aria-live="polite"></p>
+    </div>
+  </section>
+
+  <div id="app-shell" hidden>
+    <header class="site-header"><div class="shell header-inner">
+      <a class="brand" href="#/home"><span class="brand-mark" aria-hidden="true">+</span><span class="brand-text">HEALTH / ARCHIVE</span></a>
+      <button id="menu-toggle" class="icon-button" type="button" aria-label="Меню" aria-controls="header-nav" aria-expanded="false">☰</button>
+      <nav id="header-nav" class="header-nav" aria-label="Разделы">
+        <a href="#/home">Обзор</a><a href="#/problems">Проблемы</a><a href="#/labs">Анализы</a><a href="#/documents">Документы</a><a href="#/timeline">История</a>
+      </nav>
+      <div class="header-tools">
+        <label class="sr-only" for="profile-select">Выбрать профиль</label><select id="profile-select" class="select"></select>
+        <div class="search-wrap"><label class="sr-only" for="global-search">Поиск по базе</label><input id="global-search" type="search" class="input" placeholder="Поиск по базе…" autocomplete="off" aria-controls="search-results" aria-expanded="false"><div id="search-results" class="search-popover" hidden></div></div>
+        <button id="lock-button" type="button" class="icon-button" title="Заблокировать базу" aria-label="Заблокировать базу">⏻</button>
+      </div>
+    </div></header>
+    <main id="main" class="shell" tabindex="-1"></main>
+    <footer class="shell site-footer"><span>HEALTH / ARCHIVE</span><span>Материалы для подготовки к приёму. Решения о лечении — с врачом.</span><a href="#/settings">Хранение и копии ↗</a></footer>
+  </div>
+
+  <dialog id="record-dialog" class="dialog"><div class="dialog-head"><h2 id="record-title">Добавить запись</h2><button type="button" class="icon-button" data-close="record-dialog" aria-label="Закрыть">×</button></div><form id="record-form"><div id="record-fields" class="dialog-body form-grid"></div><p id="record-error" class="form-error" role="alert"></p><div class="dialog-actions"><span class="section-note">Зашифровано • сохранится в этом браузере</span><button type="button" class="button button-secondary" data-close="record-dialog">Отмена</button><button type="submit" class="button button-primary">Сохранить запись</button></div></form></dialog>
+  <dialog id="document-dialog" class="dialog document-dialog"><div class="dialog-head"><h2 id="document-title">Документ</h2><button type="button" class="icon-button" data-close="document-dialog" aria-label="Закрыть">×</button></div><div id="document-viewer" class="dialog-body"></div></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <noscript><p class="shell callout">Для расшифровки базы нужен JavaScript. Все данные открываются в вашем браузере.</p></noscript>
+</body>
+</html>
