@@ -3,8 +3,8 @@ import { decryptEnvelope, encryptJson, decryptJson, decryptAsset, encryptAsset, 
 const $ = (id) => document.getElementById(id);
 const esc = (v = '') => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const arrays = ['people', 'problems', 'labs', 'documents', 'timeline', 'actions', 'sources'];
-const emptyOverlay = () => Object.fromEntries([...arrays.map((key) => [key, []]), ['assets', {}]]);
-const state = { key:null, kdf:null, base:null, vault:null, overlay:emptyOverlay(), assets:{}, personId:null, imported:null, database:null, scope:null, urls:new Set(), timer:null, toastTimer:null, formType:null, busy:false, generation:0, documentRequest:0 };
+const emptyOverlay = () => Object.fromEntries([...arrays.map((key) => [key, []]), ['assets', {}], ['migratedScopes', []]]);
+const state = { key:null, kdf:null, base:null, vault:null, overlay:emptyOverlay(), assets:{}, personId:null, imported:null, database:null, scope:null, legacyScopes:[], urls:new Set(), timer:null, toastTimer:null, formType:null, busy:false, generation:0, documentRequest:0 };
 const dateText = (date) => {
   if (!date) return 'Дата не указана';
   const text = String(date), monthOnly = /^\d{4}-\d{2}$/.test(text);
@@ -62,6 +62,62 @@ function storedOverlay(mode, value) {
     transaction.onabort = () => reject(transaction.error || new Error('Хранилище недоступно'));
   });
 }
+function otherStoredOverlays() {
+  return new Promise((resolve, reject) => {
+    const transaction = state.database.transaction('vaults', 'readonly');
+    const store = transaction.objectStore('vaults'), keys = store.getAllKeys(), values = store.getAll();
+    transaction.oncomplete = () => {
+      const migrated = state.overlay.migratedScopes || [];
+      resolve(keys.result.map((scope,index) => ({ scope, envelope:values.result[index] })).filter((item) => typeof item.scope === 'string' && item.scope.startsWith('v1:') && item.scope !== state.scope && item.envelope?.format === 'health-vault-v1' && !migrated.includes(`${item.scope}:${item.envelope.cipher?.iv}`)));
+    };
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error || new Error('Хранилище недоступно'));
+  });
+}
+function migrationPanel() {
+  if (!state.legacyScopes.length) return '';
+  return `<section class="panel prose"><p class="eyebrow accent-orange">ДОПОЛНЕНИЯ С ПРЕЖНИМ ПАРОЛЕМ</p><h2>Перенести записи после смены пароля</h2><p>В этом браузере найдены зашифрованные дополнения с другим ключом. Введите их прежний пароль: сайт перенесёт записи и вложения под текущий ключ. Исходная зашифрованная копия останется в браузере.</p><form id="migrate-local-form"><label class="field"><span class="field-label">Прежний пароль дополнений</span><input id="previous-password" class="input" type="password" required autocomplete="off" spellcheck="false" maxlength="1024"></label><p id="migration-error" class="form-error" role="alert"></p><button class="button button-primary" type="submit">Перенести дополнения</button></form><p class="section-note">Прежние скачанные резервные копии открываются со своим прежним паролем через экран блокировки.</p></section>`;
+}
+async function migrateLocalRecords(form) {
+  if (state.busy || !state.key) return;
+  const generation = state.generation, passwordField = $('previous-password'), password = passwordField.value;
+  const submit = form.querySelector('[type="submit"]'); state.busy = true; submit.disabled = true; $('migration-error').textContent = '';
+  try {
+    const candidate = structuredClone(state.overlay); candidate.migratedScopes ||= [];
+    let matched = 0;
+    for (const legacy of state.legacyScopes) {
+      let decrypted;
+      try { decrypted = await decryptEnvelope(legacy.envelope, password); } catch { continue; }
+      if (generation !== state.generation) return;
+      const overlay = decrypted.data;
+      if (!overlay || arrays.some((key) => !Array.isArray(overlay[key])) || !overlay.assets || typeof overlay.assets !== 'object') throw new Error('Прежние данные имеют неподдерживаемый формат. Они сохранены без изменений.');
+      for (const doc of overlay.documents) {
+        if (state.base.documents.some((existing) => existing.id === doc.id) || candidate.documents.some((existing) => existing.id === doc.id)) continue;
+        if (!overlay.assets[doc.id]) throw new Error('В прежних данных отсутствует вложение. Исходная копия сохранена.');
+        const plain = await decryptAsset(fromBase64(overlay.assets[doc.id]), decrypted.key);
+        if (generation !== state.generation) return;
+        candidate.assets[doc.id] = toBase64(await encryptAsset(plain, state.key));
+        if (generation !== state.generation) return;
+      }
+      for (const key of arrays) {
+        const known = new Set([...state.base[key], ...candidate[key]].map((item) => item.id));
+        for (const item of overlay[key]) if (typeof item.id === 'string' && !known.has(item.id)) { candidate[key].push(item); known.add(item.id); }
+      }
+      candidate.migratedScopes.push(`${legacy.scope}:${legacy.envelope.cipher.iv}`); matched++;
+    }
+    if (!matched) throw new Error('Этот пароль не открывает найденные дополнения. Проверьте прежний пароль. Данные не изменены.');
+    await persistOverlay(candidate); if (generation !== state.generation) return;
+    passwordField.value = ''; state.legacyScopes = await otherStoredOverlays(); if (generation !== state.generation) return;
+    populateProfiles(); render(); toast('Дополнения перенесены под текущий пароль. Скачайте новую резервную копию.');
+  } catch (error) {
+    if (generation === state.generation) {
+      const message = error.message || 'Не удалось перенести дополнения. Исходные данные сохранены.', errorNode = $('migration-error');
+      if (errorNode) errorNode.textContent = message; else toast(message);
+    }
+  }
+  finally { passwordField.value = ''; if (generation === state.generation) { state.busy = false; submit.disabled = false; } }
+}
+document.addEventListener('submit', (event) => { if (event.target.id === 'migrate-local-form') { event.preventDefault(); void migrateLocalRecords(event.target); } });
 async function persistOverlay(candidate) {
   if (!state.database) throw new Error('Браузер не разрешил локальное хранение. Откройте сайт в обычном режиме браузера.');
   const generation = state.generation;
@@ -84,7 +140,7 @@ function lock(message = '') {
   state.generation++; clearTimeout(state.timer); clearTimeout(state.toastTimer);
   for (const id of ['record-dialog','document-dialog']) if ($(id).open) $(id).close();
   revokeDocuments();
-  Object.assign(state, { key:null, kdf:null, base:null, vault:null, overlay:emptyOverlay(), assets:{}, personId:null, scope:null, busy:false });
+  Object.assign(state, { key:null, kdf:null, base:null, vault:null, overlay:emptyOverlay(), assets:{}, personId:null, scope:null, legacyScopes:[], busy:false });
   state.database?.close(); state.database = null;
   $('main').replaceChildren(); $('profile-select').replaceChildren(); $('search-results').replaceChildren(); $('search-results').hidden = true;
   $('record-fields').replaceChildren(); $('record-title').textContent = 'Добавить запись'; $('document-title').textContent = 'Документ';
@@ -116,6 +172,7 @@ $('unlock-form').addEventListener('submit', async (event) => {
         if (!local || arrays.some((key) => !Array.isArray(local[key])) || typeof local.assets !== 'object') throw new Error('Неверный формат локальных записей');
         state.overlay = local;
       }
+      state.legacyScopes = await otherStoredOverlays();
     } catch { warning = 'Локальные записи недоступны. Исходная база открыта; импортируйте резервную копию, если добавляли данные.'; }
     mergeVault(); state.personId = state.vault.people[0].id;
     populateProfiles(); $('lock-screen').hidden = true; $('app-shell').hidden = false;
@@ -217,6 +274,7 @@ function render() {
   else if (page === 'sources') html = `${heading('06 / ДОКАЗАТЕЛЬНАЯ БАЗА','Источники','Исследования, обзоры и профессиональные рекомендации, использованные в разборах.')}${sourceList(state.vault.sources.filter((s) => records('problems').some((p) => (p.sourceIds || []).includes(s.id))))}`;
   else if (page === 'settings') html = settingsPage();
   else html = `${heading('СТРАНИЦА НЕ НАЙДЕНА','Такого раздела нет','Выберите раздел в меню.')}${routeLink('home','На главную →','button button-primary')}`;
+  if (state.legacyScopes.length) html = (page === 'settings' ? '' : `<div class="local-notice">Найдены дополнения с прежним паролем. ${routeLink('settings','Перенести записи →')}</div>`) + html + (page === 'settings' ? migrationPanel() : '');
   $('main').innerHTML = html;
   for (const link of $('header-nav').querySelectorAll('a')) { const active = link.hash === `#/${page === 'problem' ? 'problems' : page === 'lab' ? 'labs' : page}`; if (active) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current'); }
   $('header-nav').classList.remove('is-open'); $('menu-toggle').ariaExpanded = 'false'; hideSearch();
@@ -271,6 +329,11 @@ async function openDocument(id) {
     const hint = document.createElement('p'); hint.className = 'section-note'; hint.textContent = 'После скачивания на устройстве останется обычный расшифрованный файл.';
     const download = document.createElement('a'); download.className = 'button button-primary button-small'; download.href = url; download.download = doc.fileName || 'document'; download.textContent = 'Скачать документ ↓';
     $('document-viewer').append(hint, download);
+    if (doc.mime === 'application/pdf') {
+      const open = document.createElement('a'); open.className = 'button button-secondary button-small'; open.href = url; open.target = '_blank'; open.rel = 'noopener noreferrer'; open.textContent = 'Открыть PDF отдельно ↗';
+      const note = document.createElement('p'); note.className = 'section-note'; note.textContent = 'Если предпросмотр на телефоне пустой, откройте PDF отдельно или скачайте его для просмотра в приложении.';
+      $('document-viewer').append(open, note);
+    }
     if (doc.mime === 'application/pdf') { const frame = document.createElement('iframe'); frame.src = url; frame.title = doc.title; frame.className = 'pdf-frame'; $('document-viewer').append(frame); }
     else { const pre = document.createElement('pre'); pre.className = 'document-text'; pre.textContent = new TextDecoder().decode(plain); $('document-viewer').append(pre); }
   } catch (error) { if (generation === state.generation && request === state.documentRequest) $('document-viewer').textContent = error.name === 'OperationError' ? 'Не удалось проверить целостность документа.' : error.message; }
