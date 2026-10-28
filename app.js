@@ -1,10 +1,16 @@
 import { decryptEnvelope, encryptJson, decryptJson, decryptAsset, encryptAsset, toBase64, fromBase64 } from './crypto.js';
+import * as model from './model.js';
+import * as views from './views.js';
+import { createSyncClient, syncScope } from './sync.js';
+import { SYNC_ORIGIN } from './config.js';
+import { installRecordController, prepareAttachment } from './records-controller.js';
+import { extractDocument, parseLabText } from './import.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (v = '') => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
-const arrays = ['people', 'problems', 'labs', 'documents', 'timeline', 'actions', 'sources'];
-const emptyOverlay = () => Object.fromEntries([...arrays.map((key) => [key, []]), ['assets', {}], ['migratedScopes', []]]);
-const state = { key:null, kdf:null, base:null, vault:null, overlay:emptyOverlay(), assets:{}, personId:null, imported:null, database:null, scope:null, legacyScopes:[], urls:new Set(), timer:null, toastTimer:null, formType:null, busy:false, generation:0, documentRequest:0 };
+const arrays = model.COLLECTIONS;
+const emptyOverlay = () => model.normalizeOverlay({});
+const state = { key:null, kdf:null, base:null, vault:null, overlay:emptyOverlay(), assets:{}, personId:null, imported:null, database:null, scope:null, legacyScopes:[], urls:new Set(), downloadUrls:new Set(), timer:null, toastTimer:null, formType:null, editing:null, busy:false, generation:0, documentRequest:0, filters:{}, sync:null, syncEtag:undefined, syncStatus:'Локальная копия', syncTimer:null, conflict:null, importDraft:null, visitDraft:null };
 const dateText = (date) => {
   if (!date) return 'Дата не указана';
   const text = String(date), monthOnly = /^\d{4}-\d{2}$/.test(text);
@@ -40,9 +46,7 @@ function validateVault(data) {
   return data;
 }
 function mergeVault() {
-  const vault = { ...state.base };
-  for (const key of arrays) vault[key] = [...state.base[key], ...state.overlay[key].filter((record) => !state.base[key].some((original) => original.id === record.id))];
-  state.vault = vault;
+  state.vault = model.mergeVault(state.base, state.overlay);
 }
 function openDatabase() {
   return new Promise((resolve, reject) => {
@@ -60,6 +64,14 @@ function storedOverlay(mode, value) {
     transaction.oncomplete = () => resolve(request.result);
     transaction.onerror = () => reject(transaction.error);
     transaction.onabort = () => reject(transaction.error || new Error('Хранилище недоступно'));
+  });
+}
+function compareAndStore(envelope,expectedIV){
+  const database=state.database,scope=state.scope;
+  return new Promise((resolve,reject)=>{
+    const tx=database.transaction('vaults','readwrite'),store=tx.objectStore('vaults'),read=store.get(scope);let written=false;
+    read.onsuccess=()=>{if((read.result?.cipher?.iv||null)!==expectedIV)return;store.put(envelope,scope);written=true;};
+    tx.oncomplete=()=>resolve(written);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||Error('Не удалось сохранить запись.'));
   });
 }
 function otherStoredOverlays() {
@@ -83,26 +95,28 @@ async function migrateLocalRecords(form) {
   const generation = state.generation, passwordField = $('previous-password'), password = passwordField.value;
   const submit = form.querySelector('[type="submit"]'); state.busy = true; submit.disabled = true; $('migration-error').textContent = '';
   try {
-    const candidate = structuredClone(state.overlay); candidate.migratedScopes ||= [];
+    let candidate = structuredClone(state.overlay); candidate.migratedScopes ||= [];
     let matched = 0;
     for (const legacy of state.legacyScopes) {
       let decrypted;
       try { decrypted = await decryptEnvelope(legacy.envelope, password); } catch { continue; }
       if (generation !== state.generation) return;
-      const overlay = decrypted.data;
+      const overlay = model.normalizeOverlay(decrypted.data);
       if (!overlay || arrays.some((key) => !Array.isArray(overlay[key])) || !overlay.assets || typeof overlay.assets !== 'object') throw new Error('Прежние данные имеют неподдерживаемый формат. Они сохранены без изменений.');
-      for (const doc of overlay.documents) {
-        if (state.base.documents.some((existing) => existing.id === doc.id) || candidate.documents.some((existing) => existing.id === doc.id)) continue;
-        if (!overlay.assets[doc.id]) throw new Error('В прежних данных отсутствует вложение. Исходная копия сохранена.');
-        const plain = await decryptAsset(fromBase64(overlay.assets[doc.id]), decrypted.key);
+      const convertedAssets={};
+      for (const [assetId,encrypted] of Object.entries(overlay.assets)) {
+        const plain = await decryptAsset(fromBase64(encrypted), decrypted.key);
         if (generation !== state.generation) return;
-        candidate.assets[doc.id] = toBase64(await encryptAsset(plain, state.key));
+        if(candidate.assets[assetId]){
+          const existing=await decryptAsset(fromBase64(candidate.assets[assetId]),state.key),hash=async b=>toBase64(await crypto.subtle.digest('SHA-256',b));
+          if(await hash(existing)!==await hash(plain))throw Error('Найдены разные версии вложения. Прежняя зашифрованная копия сохранена.');
+          convertedAssets[assetId]=candidate.assets[assetId];
+        }else convertedAssets[assetId]=toBase64(await encryptAsset(plain,state.key));
         if (generation !== state.generation) return;
       }
-      for (const key of arrays) {
-        const known = new Set([...state.base[key], ...candidate[key]].map((item) => item.id));
-        for (const item of overlay[key]) if (typeof item.id === 'string' && !known.has(item.id)) { candidate[key].push(item); known.add(item.id); }
-      }
+      const merged=model.mergeOverlays(candidate,{...overlay,assets:convertedAssets});
+      if(merged.conflicts.length)throw Error('В прежних дополнениях есть пересекающиеся изменения. Исходная копия сохранена; сначала откройте её резервную копию отдельно.');
+      candidate=merged.overlay;
       candidate.migratedScopes.push(`${legacy.scope}:${legacy.envelope.cipher.iv}`); matched++;
     }
     if (!matched) throw new Error('Этот пароль не открывает найденные дополнения. Проверьте прежний пароль. Данные не изменены.');
@@ -118,14 +132,31 @@ async function migrateLocalRecords(form) {
   finally { passwordField.value = ''; if (generation === state.generation) { state.busy = false; submit.disabled = false; } }
 }
 document.addEventListener('submit', (event) => { if (event.target.id === 'migrate-local-form') { event.preventDefault(); void migrateLocalRecords(event.target); } });
-async function persistOverlay(candidate) {
+document.addEventListener('submit',event=>{if(event.target.id==='visit-plan-form'){event.preventDefault();void saveVisit(event.target).catch(error=>toast(error.message));}});
+async function persistOverlay(candidate,{sync=true,replace=false}={}) {
   if (!state.database) throw new Error('Браузер не разрешил локальное хранение. Откройте сайт в обычном режиме браузера.');
   const generation = state.generation;
-  const envelope = await encryptJson(candidate, state.key, state.kdf);
-  if (generation !== state.generation) throw new Error('База заблокирована. Откройте её ещё раз.');
-  await storedOverlay('write', envelope);
-  if (generation !== state.generation) return;
-  state.overlay = candidate; mergeVault();
+  const operation=async()=>{
+    if(generation!==state.generation)throw Error('База заблокирована.');
+    for(let attempt=0;attempt<4;attempt++){
+      const stored=await storedOverlay('read');if(generation!==state.generation)throw Error('База заблокирована.');
+      const disk=stored?model.normalizeOverlay(await decryptJson(stored,state.key)):emptyOverlay();if(generation!==state.generation)throw Error('База заблокирована.');
+      const local=replace?{overlay:model.normalizeOverlay(candidate),conflicts:[]}:model.mergeOverlays(state.overlay,candidate);
+      const merged=replace?local:model.mergeOverlays(local.overlay,disk);
+      if(local.conflicts.length||merged.conflicts.length){
+        const draft=await encryptJson(candidate,state.key,state.kdf);if(generation!==state.generation)throw Error('База заблокирована.');
+        await putRecovery(`recovery:${new Date().toISOString()}:tab-draft`,draft);
+        throw Error('Запись изменена в другой вкладке. Её версия не перезаписана; ваша версия сохранена в «Хранение и копии». Откройте базу заново перед изменением.');
+      }
+      if(replace&&stored)await putRecovery(`recovery:${new Date().toISOString()}:before-choice`,stored);
+      const envelope=await encryptJson(merged.overlay,state.key,state.kdf);if(generation!==state.generation)throw Error('База заблокирована.');
+      if(!await compareAndStore(envelope,stored?.cipher?.iv||null))continue;
+      if(generation!==state.generation)return;state.overlay=merged.overlay;state.localRevision=(state.localRevision||0)+1;mergeVault();setSyncStatus('Сохранено в этом браузере');
+      if(sync&&state.sync?.connected&&state.syncEtag!==undefined){clearTimeout(state.syncTimer);state.syncTimer=setTimeout(()=>{void synchronize(false);},1200);}return;
+    }
+    throw Error('Другая вкладка продолжает менять базу. Ничего не перезаписано; повторите сохранение.');
+  };
+  const task=(state.persistChain||Promise.resolve()).catch(()=>{}).then(operation);state.persistChain=task;return task;
 }
 function armLock() {
   if (!state.key) return;
@@ -138,12 +169,17 @@ function revokeDocuments() {
 }
 function lock(message = '') {
   state.generation++; clearTimeout(state.timer); clearTimeout(state.toastTimer);
-  for (const id of ['record-dialog','document-dialog']) if ($(id).open) $(id).close();
+  state.importAbort?.abort();
+  state.importRequest=(state.importRequest||0)+1;$('extract-document').disabled=false;$('import-document-file').disabled=false;
+  for (const id of ['record-dialog','document-dialog','import-dialog','sync-conflict-dialog']) if ($(id)?.open) $(id).close();
   revokeDocuments();
-  Object.assign(state, { key:null, kdf:null, base:null, vault:null, overlay:emptyOverlay(), assets:{}, personId:null, scope:null, legacyScopes:[], busy:false });
+  for(const url of state.downloadUrls)URL.revokeObjectURL(url);state.downloadUrls.clear();
+  clearTimeout(state.syncTimer); state.sync?.close();
+  Object.assign(state, { key:null, kdf:null, base:null, vault:null, overlay:emptyOverlay(), assets:{}, personId:null, scope:null, legacyScopes:[], busy:false, editing:null, importDraft:null, visitDraft:null, sync:null, syncEtag:undefined, conflict:null, importInputFile:null,backupSession:false });
   state.database?.close(); state.database = null;
   $('main').replaceChildren(); $('profile-select').replaceChildren(); $('search-results').replaceChildren(); $('search-results').hidden = true;
   $('record-fields').replaceChildren(); $('record-title').textContent = 'Добавить запись'; $('document-title').textContent = 'Документ';
+  $('import-review-fields').replaceChildren();$('import-document-file').value='';$('import-review-form').hidden=true;$('import-progress').textContent='';$('import-error').textContent='';$('sync-conflict-list').replaceChildren();state.persistChain=null;state.localRevision=0;state.syncBusy=false;
   $('global-search').value = ''; $('password').value = ''; $('password').type = 'password'; $('password-toggle').ariaPressed = 'false';
   $('app-shell').hidden = true; $('lock-screen').hidden = false; $('unlock-error').textContent = message;
   $('toast').hidden = true; $('toast').textContent = ''; $('unlock-submit').disabled = false; $('unlock-submit').textContent = 'Открыть базу ↗';
@@ -159,20 +195,22 @@ $('unlock-form').addEventListener('submit', async (event) => {
     if (!envelope) { const response = await fetch('vault.json', { cache:'no-store' }); if (!response.ok) throw new Error('Не удалось загрузить хранилище. Проверьте соединение.'); envelope = await response.json(); }
     const decrypted = await decryptEnvelope(envelope, $('password').value);
     $('password').value = '';
-    const data = decrypted.data.vault || decrypted.data;
+    const data = model.normalizeVault(decrypted.data.vault || decrypted.data);
     validateVault(data);
-    state.key = decrypted.key; state.kdf = envelope.kdf; state.base = data; state.assets = decrypted.data.assets || {}; state.scope = `v1:${envelope.kdf.salt}`;
-    state.overlay = emptyOverlay();
+    state.key = decrypted.key; state.kdf = envelope.kdf; state.base = data; state.assets = decrypted.data.assets || {};state.backupSession=!!decrypted.data.vault;state.scope=state.backupSession?`backup:${envelope.kdf.salt}:${envelope.cipher.iv}`:`v1:${envelope.kdf.salt}`;
+    state.overlay = model.normalizeOverlay(decrypted.data.overlay||{});
     let warning = '';
     try {
       state.database = await openDatabase();
       const stored = await storedOverlay('read');
       if (stored) {
-        const local = await decryptJson(stored, state.key);
+        const local = model.normalizeOverlay(await decryptJson(stored, state.key));
         if (!local || arrays.some((key) => !Array.isArray(local[key])) || typeof local.assets !== 'object') throw new Error('Неверный формат локальных записей');
-        state.overlay = local;
+        const merged=model.mergeOverlays(state.overlay,local);
+        if(merged.conflicts.length)throw Error('Копии содержат разные изменения. Откройте резервную копию в отдельном браузере.');
+        state.overlay = merged.overlay;
       }
-      state.legacyScopes = await otherStoredOverlays();
+      state.legacyScopes = state.backupSession?[]:await otherStoredOverlays();
     } catch { warning = 'Локальные записи недоступны. Исходная база открыта; импортируйте резервную копию, если добавляли данные.'; }
     mergeVault(); state.personId = state.vault.people[0].id;
     populateProfiles(); $('lock-screen').hidden = true; $('app-shell').hidden = false;
@@ -200,10 +238,11 @@ $('import-file').addEventListener('change', async () => {
 });
 
 function populateProfiles() {
+  if(!state.vault.people.some(p=>p.id===state.personId))state.personId=state.vault.people[0]?.id;
   $('profile-select').innerHTML = state.vault.people.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
   $('profile-select').value = state.personId;
 }
-$('profile-select').addEventListener('change', () => { state.personId = $('profile-select').value; $('global-search').value = ''; hideSearch(); location.hash = '#/home'; render(); });
+$('profile-select').addEventListener('change', () => { state.personId = $('profile-select').value; state.filters={};state.visitDraft=null;$('global-search').value = ''; hideSearch(); location.hash = '#/home'; render(); });
 $('menu-toggle').addEventListener('click', () => { const open = $('menu-toggle').ariaExpanded !== 'true'; $('header-nav').classList.toggle('is-open', open); $('menu-toggle').ariaExpanded = String(open); });
 window.addEventListener('hashchange', () => { if (state.key) { render(); $('main').focus({ preventScroll:true }); window.scrollTo({ top:0, behavior:'instant' }); } });
 
@@ -223,7 +262,8 @@ function actionList(actions) {
   return `<div class="action-list">${actions.map((action, index) => `<article class="action-item"><span class="result-number">${String(index + 1).padStart(2,'0')}</span><div><div class="card-top"><span class="eyebrow ${action.priority === 'next' ? 'accent-cyan' : ''}">${esc(action.timing || ({ next:'Ближайший шаг', planned:'Планово', conditional:'По показаниям' }[action.priority]))}</span>${localBadge(action)}</div><h3>${esc(action.title)}</h3><p>${esc(action.description)}</p>${action.problemId && getProblem(action.problemId) ? routeLink(`problem/${encodeURIComponent(action.problemId)}`, esc(getProblem(action.problemId).title), 'section-note') : ''}</div></article>`).join('')}</div>`;
 }
 function timeline(events) {
-  return events.length ? `<div class="timeline">${[...events].sort((a,b) => b.date.localeCompare(a.date)).map((item) => `<article class="timeline-item"><time class="timeline-date" datetime="${esc(item.date)}">${dateText(item.date)}</time><div><p class="eyebrow">${esc(eventLabel[item.type] || item.type || 'Событие')}</p><h3 class="timeline-title">${esc(item.title)}</h3><p class="timeline-copy">${esc(item.description)}</p>${localBadge(item)}${item.documentId && getDocument(item.documentId) ? `<button class="button button-secondary button-small" data-document="${esc(item.documentId)}" type="button">Документ ↗</button>` : ''}</div></article>`).join('')}</div>` : empty('Консультации, симптомы и новые результаты будут появляться здесь.');
+  const sorted=[...events].sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+  return sorted.length?'<div class="timeline">'+sorted.map(item=>`<article class="timeline-item"><time class="timeline-date">${dateText(item.date)}</time><div><p class="eyebrow">${esc(eventLabel[item.type]||item.type||'Событие')}</p><h3 class="timeline-title">${esc(item.title)}</h3><p class="timeline-copy">${esc(item.description)}</p>${localBadge(item)}<div class="record-tools"><button class="button button-secondary button-small" data-edit="timeline:${esc(item.id)}" type="button">Изменить</button>${routeLink('history/timeline/'+encodeURIComponent(item.id),'История изменений','button button-secondary button-small')}${item.documentId&&getDocument(item.documentId)?`<button class="button button-secondary button-small" data-document="${esc(item.documentId)}" type="button">Документ ↗</button>`:''}</div></div></article>`).join('')+'</div>':empty('Консультации, симптомы и результаты будут появляться здесь.');
 }
 function sourceList(sources) {
   return `<ol class="source-list">${sources.map((source) => { const url = safeUrl(source.url), number = Number.isSafeInteger(source.number) ? source.number : null; return `<li class="source-item"${number ? ` value="${number}"` : ''}><span class="badge">${number ? `[${number}] · ` : ''}${esc(source.kind || 'Источник')}${source.year ? ` / ${esc(source.year)}` : ''}</span><h3>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(source.title)} ↗</a>` : esc(source.title)}</h3>${source.note ? `<p>${esc(source.note)}</p>` : ''}</li>`; }).join('')}</ol>`;
@@ -255,27 +295,41 @@ function profilesPage() {
   return `${heading('ПРОФИЛИ','Истории людей','Отдельные проблемы, результаты и документы для каждого человека.',button('person','Добавить профиль'))}<div class="card-grid">${state.vault.people.map((p) => `<article class="profile-card panel"><span class="profile-avatar">${esc(p.initials || p.name.slice(0,1))}</span><h2>${esc(p.name)}</h2><p>${esc(p.summary)}</p>${localBadge(p)}<div class="card-footer"><span>${state.vault.problems.filter((problem) => problem.personId === p.id).length} разборов</span><button class="button button-secondary button-small" data-profile="${esc(p.id)}" type="button">${p.id === state.personId ? 'Текущий профиль' : 'Открыть профиль →'}</button></div></article>`).join('')}</div>`;
 }
 function settingsPage() {
-  return `${heading('ХРАНЕНИЕ','Данные под вашим контролем','Опубликованные материалы и локальные дополнения хранятся зашифрованными.')}<div class="detail-grid"><section class="panel prose"><p class="eyebrow accent-cyan">РЕЗЕРВНАЯ КОПИЯ</p><h2>Сохранить всю базу</h2><p>Копия включает текущие профили, записи и все документы. Она зашифрована тем же паролем. Сохраните её перед очисткой браузера и переносом на другое устройство.</p><button class="button button-primary" id="export-backup" type="button">Скачать зашифрованную копию ↗</button><p class="section-note">Для открытия: заблокируйте базу → «Открыть резервную копию» → введите пароль.</p></section><section class="panel prose"><p class="eyebrow accent-violet">ДОПОЛНЕНИЯ</p><h2>Что сохраняет сайт</h2><p>Новые профили, проблемы, анализы, документы, события и действия сохраняются только в этом браузере. Они не загружаются в GitHub и не появляются автоматически на другом устройстве.</p><p>Чтобы обновить общую опубликованную версию, нужно включить новые материалы в исходную базу и опубликовать заново. Резервная копия переносит текущую версию без публикации.</p>${button('person','Новый профиль')}</section></div><section class="callout prose"><h2>Пароль и блокировка</h2><p>Сайт не хранит пароль. Расшифрованные записи находятся в памяти до блокировки или закрытия страницы. Через 15 минут бездействия база блокируется автоматически.</p><p>Кто знает пароль, сможет прочитать всю базу и документы. Восстановить забытый пароль на сервере невозможно. Сохраните пароль отдельно от копии.</p><p>При скачивании отдельного документа создаётся обычный расшифрованный файл на вашем устройстве. Блокировка сайта не удаляет такие файлы и уже сделанные копии.</p><button class="button button-secondary" data-lock type="button">Заблокировать сейчас</button></section>`;
+  return heading('ХРАНЕНИЕ','Данные под вашим контролем','Локальная копия, зашифрованное облако и резервные версии.')+`<div class="detail-grid"><section class="panel prose"><p class="eyebrow accent-cyan">РЕЗЕРВНАЯ КОПИЯ</p><h2>Сохранить всю базу</h2><p>Копия включает профили, записи, историю исправлений и все документы. Она зашифрована текущим паролем.</p><button class="button button-primary" id="export-backup" type="button">Скачать зашифрованную копию ↗</button><p class="section-note">Открытие: заблокируйте базу → «Открыть резервную копию» → введите пароль этой копии. Скачанные до смены пароля копии сохраняют прежний пароль.</p></section><section class="panel prose"><p class="eyebrow accent-violet">СОХРАНЕНИЕ</p><h2>Браузер и другие устройства</h2><p>Изменения сначала сохраняются зашифрованными в этом браузере. После подключения личного хранилища они синхронизируются, пока окно хранилища открыто. Статус сохранения виден внизу страницы.</p><p>При конфликте устройств обе копии сохраняются перед выбором. Их можно скачать ниже. Очистка браузера удаляет его локальные версии; сохраняйте резервную копию отдельно.</p><button class="button button-secondary" id="show-recovery" type="button">Показать сохранённые версии</button><div id="recovery-list"></div></section></div><section class="callout prose"><h2>Пароль и блокировка</h2><p>Пароль не сохраняется приложением и не передаётся облачному сервису. Через 15 минут бездействия база блокируется.</p><p>В отдельной сводке для врача и скачанном исходном документе данные уже расшифрованы. Блокировка сайта очищает текущую страницу; скачанные файлы остаются на устройстве.</p><button class="button button-secondary" data-lock type="button">Заблокировать сейчас</button></section>`;
 }
 function render() {
   if (!state.vault) return;
+  const previousVisit=$('visit-plan-form');
+  if(!state.skipVisitCapture&&previousVisit?.dataset.personId===state.personId)state.visitDraft=currentVisit(previousVisit);
+  state.skipVisitCapture=false;
   const parts = (location.hash.replace(/^#\/?/,'') || 'home').split('/');
   const page = parts[0]; let id = ''; try { id = decodeURIComponent(parts[1] || ''); } catch { /* malformed URL has no matching record */ }
   let html;
-  if (page === 'home') html = home();
-  else if (page === 'problems') html = `${heading('01 / ИССЛЕДОВАНИЯ','Разборы проблем','По каждой теме: выводы, подтверждения, неопределённость и план.',button('problem','Добавить проблему'))}<div class="card-grid">${records('problems').map(problemCard).join('') || empty('В этом профиле пока нет разборов.')}</div>`;
-  else if (page === 'problem') html = problemDetail(id);
-  else if (page === 'labs') html = labsPage();
-  else if (page === 'lab') html = labDetail(id);
-  else if (page === 'documents') html = `${heading('03 / АРХИВ','Документы','Исходные бланки, консультации и подробные исследовательские обзоры.',button('document','Добавить документ'))}<div class="filter-row"><label class="field"><span class="field-label">Тип документа</span><select id="document-kind" class="select"><option value="">Все документы</option>${Object.entries(kindLabel).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select></label></div><div id="document-results" class="card-grid">${records('documents').map(documentCard).join('') || empty('Добавьте документ, чтобы сохранить его вместе с историей.')}</div>`;
+  if (page === 'home') html = views.renderDashboard(viewContext());
+  else if (page === 'problems') html = views.renderProblems(viewContext());
+  else if (page === 'problem') html = problemControls(id) + problemDetail(id) + problemNotes(id) + relatedCare(id);
+  else if (page === 'labs') html = views.renderLabOverview(viewContext());
+  else if (page === 'lab') html = views.renderLabHistory(viewContext(),id);
+  else if (page === 'care') html = views.renderCare(viewContext());
+  else if (page === 'visit') html = views.renderVisit(viewContext());
+  else if (page === 'visit-report') { const report=records('visits').find(v=>v.id===id)||state.visitDraft; html=report?views.renderVisitReport(viewContext(),report)+`<button class="button button-secondary v2-no-print" type="button" data-download-visit="${esc(report.id)}">Скачать сводку HTML</button>`:empty('Сводка не найдена.'); }
+  else if (page === 'history') {let recordId='';try{recordId=decodeURIComponent(parts[2]||'');}catch{}html=arrays.includes(id)?views.renderHistory(viewContext(),id,recordId):empty('Неизвестный раздел истории.');}
+  else if (page === 'documents') html = `${heading('03 / АРХИВ','Документы','Исходные бланки, консультации и подробные исследовательские обзоры.',button('document','Добавить документ'))}<div class="filter-row"><label class="field"><span class="field-label">Тип документа</span><select id="document-kind" class="select"><option value="">Все документы</option>${Object.entries(kindLabel).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select></label></div><div id="document-results" class="card-grid">${records('documents').filter(d=>!state.filters.documentKind||d.kind===state.filters.documentKind).map(documentCard).join('') || empty('Добавьте документ, чтобы сохранить его вместе с историей.')}</div>`;
   else if (page === 'timeline') html = `${heading('04 / ХРОНОЛОГИЯ','История событий','Симптомы, консультации, анализы и обновления в одной ленте.',button('timeline','Добавить событие'))}<section class="panel">${timeline(records('timeline'))}</section>`;
-  else if (page === 'actions') html = `${heading('05 / ДАЛЬНЕЙШИЕ ШАГИ','План действий','Основа для обсуждения с врачом. Шаги по показаниям нужны при выполнении описанных условий.',button('action','Добавить шаг'))}<section class="panel">${actionList(records('actions'))}</section>`;
+  else if (page === 'actions') html = `${heading('05 / ДАЛЬНЕЙШИЕ ШАГИ','План действий','Выполненные действия сохраняются в истории. Статус проблемы меняется отдельно.',button('action','Добавить шаг'))}<section class="panel">${views.renderTasks(viewContext(),records('actions'))}</section>`;
   else if (page === 'profiles') html = profilesPage();
   else if (page === 'sources') html = `${heading('06 / ДОКАЗАТЕЛЬНАЯ БАЗА','Источники','Исследования, обзоры и профессиональные рекомендации, использованные в разборах.')}${sourceList(state.vault.sources.filter((s) => records('problems').some((p) => (p.sourceIds || []).includes(s.id))))}`;
-  else if (page === 'settings') html = settingsPage();
+  else if (page === 'settings') html = syncPanel() + settingsPage();
   else html = `${heading('СТРАНИЦА НЕ НАЙДЕНА','Такого раздела нет','Выберите раздел в меню.')}${routeLink('home','На главную →','button button-primary')}`;
   if (state.legacyScopes.length) html = (page === 'settings' ? '' : `<div class="local-notice">Найдены дополнения с прежним паролем. ${routeLink('settings','Перенести записи →')}</div>`) + html + (page === 'settings' ? migrationPanel() : '');
+  if(state.backupSession)html=`<div class="local-notice">Открыта резервная копия. Её изменения сохраняются отдельно; основная база и облако остаются прежними. <button class="button button-secondary button-small" type="button" data-return-published>Открыть основную базу</button></div>`+html;
   $('main').innerHTML = html;
+  if($('visit-plan-form'))$('visit-plan-form').dataset.personId=state.personId;
+  if($('document-kind'))$('document-kind').value=state.filters.documentKind||'';
+  if(page==='documents') $('main').querySelector('.section-head')?.insertAdjacentHTML('beforeend','<button class="button button-secondary" type="button" data-import>Извлечь из файла</button>');
+  for (const card of $('main').querySelectorAll('.document-card')) { const id=card.querySelector('[data-document]')?.dataset.document; if(id)card.insertAdjacentHTML('beforeend',`<div class="record-tools"><button class="button button-secondary button-small" data-edit="documents:${esc(id)}" type="button">Изменить</button>${routeLink(`history/documents/${encodeURIComponent(id)}`,'История изменений','button button-secondary button-small')}</div>`); }
+  for(const card of $('main').querySelectorAll('.document-card')){const id=card.querySelector('[data-document]')?.dataset.document,doc=id&&getDocument(id);if(doc)card.insertAdjacentHTML('beforeend',`<button class="button button-secondary button-small" type="button" data-import-document="${esc(id)}">Извлечь результаты из документа</button>`);}
+  for (const card of $('main').querySelectorAll('.profile-card')) { const id=card.querySelector('[data-profile]')?.dataset.profile; if(id)card.insertAdjacentHTML('beforeend',`<button class="button button-secondary button-small" type="button" data-edit="people:${esc(id)}">Изменить профиль</button>`); }
   for (const link of $('header-nav').querySelectorAll('a')) { const active = link.hash === `#/${page === 'problem' ? 'problems' : page === 'lab' ? 'labs' : page}`; if (active) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current'); }
   $('header-nav').classList.remove('is-open'); $('menu-toggle').ariaExpanded = 'false'; hideSearch();
 }
@@ -284,7 +338,7 @@ function hideSearch() { $('search-results').hidden = true; $('global-search').ar
 $('global-search').addEventListener('input', () => {
   const query = $('global-search').value.trim().toLocaleLowerCase('ru');
   if (!query) { hideSearch(); return; }
-  const candidates = [...records('problems').map((p) => ({ title:p.title, copy:p.summary, path:`problem/${encodeURIComponent(p.id)}`, type:'Разбор' })), ...records('labs').map((l) => ({ title:l.name, copy:`${l.value} ${l.unit} · ${l.interpretation}`, path:`lab/${encodeURIComponent(l.id)}`, type:'Анализ' })), ...records('documents').map((d) => ({ title:d.title, copy:d.description, documentId:d.id, type:'Документ' }))];
+  const candidates = [...records('problems').map((p) => ({ title:p.title, copy:p.summary, path:`problem/${encodeURIComponent(p.id)}`, type:'Разбор' })), ...records('labs').map((l) => ({ title:l.name, copy:`${l.value} ${l.unit} · ${l.interpretation}`, path:`lab/${encodeURIComponent(l.id)}`, type:'Анализ' })), ...records('documents').map((d) => ({ title:d.title, copy:d.description, documentId:d.id, type:'Документ' })),...records('medications').map(m=>({title:m.name,copy:[m.reason,m.notes,m.dose].join(' '),path:'care',type:'Препарат'})),...records('symptoms').map(s=>({title:s.title,copy:s.description,path:'care',type:'Наблюдение'})),...records('visits').map(v=>({title:v.title,copy:[v.complaints,v.questions].join(' '),path:`visit-report/${encodeURIComponent(v.id)}`,type:'Для приёма'}))];
   const results = candidates.filter((r) => `${r.title} ${r.copy}`.toLocaleLowerCase('ru').includes(query)).slice(0,10);
   $('search-results').innerHTML = results.length ? results.map((r) => r.documentId ? `<button type="button" class="search-result" data-document="${esc(r.documentId)}"><span class="eyebrow">${r.type}</span><strong>${esc(r.title)}</strong></button>` : routeLink(r.path, `<span class="eyebrow">${r.type}</span><strong>${esc(r.title)}</strong>`, 'search-result')).join('') : '<p class="search-result">Ничего не найдено.</p>';
   $('search-results').hidden = false; $('global-search').ariaExpanded = 'true';
@@ -297,16 +351,36 @@ document.addEventListener('click', async (event) => {
   if (target.dataset.close) $(target.dataset.close)?.close();
   if (!state.key) return;
   if (target.dataset.add) showForm(target.dataset.add);
+  if(target.dataset.edit)showEdit(target.dataset.edit);
+  if(target.dataset.lifecycle)showForm('problem',target.dataset.lifecycle);
+  if(target.hasAttribute('data-import'))openImport();
+  if(target.dataset.importDocument){const doc=getDocument(target.dataset.importDocument),generation=state.generation;if(doc){try{const plain=await decryptAsset(await encryptedDocument(doc),state.key);if(generation!==state.generation)return;openImport();await runExtraction(new File([plain],doc.fileName||'document.pdf',{type:doc.mime}),doc);}catch(error){if(generation===state.generation)toast(error.message);}}}
+  if(target.dataset.reviewlab)await patchRecord('labs',target.dataset.reviewlab,{reviewed:true},'Результат отмечен разобранным пользователем');
+  if(target.dataset.favorite){const series=model.labSeries(records('labs'),target.dataset.favorite),favorite=!series.some(l=>l.favorite);let candidate=state.overlay;for(const lab of series)candidate=model.editOverlay(candidate,state.vault,'labs',lab.id,{favorite},'Избранный показатель');try{await persistOverlay(candidate);render();}catch(error){toast(error.message);}}
+  if(target.dataset.actiontoggle){const action=records('actions').find(a=>a.id===target.dataset.actiontoggle);if(action){const done=action.done===true||action.completed===true||!!action.completedAt||action.status==='completed';await patchRecord('actions',action.id,{done:!done,completed:!done,completedAt:done?null:new Date().toISOString(),...(action.status==='completed'?{status:done?'planned':'completed'}:{})},done?'Действие открыто повторно':'Действие выполнено');}}
+  if(target.id==='connect-sync')await synchronize(true);
+  if(target.id==='sync-now')await synchronize(!state.sync?.connected);
+  if(target.id==='disconnect-sync'){state.sync?.close();state.sync=null;state.syncEtag=undefined;setSyncStatus('Облако отключено; локальная копия сохранена');}
+  if(target.dataset.syncChoice)await chooseSyncVersion(target.dataset.syncChoice);
+  if(target.id==='show-recovery')await showRecoveryVersions();
+  if(target.dataset.recovery)await downloadRecovery(target.dataset.recovery);
+  if(target.dataset.visitExport){state.visitDraft=null;location.hash=`#/visit-report/${encodeURIComponent(target.dataset.visitExport)}`;render();}
+  if(target.hasAttribute('data-download-visit'))exportVisit(target.dataset.downloadVisit);
+  if(target.hasAttribute('data-visit-preview')){const form=$('visit-plan-form');if(form){state.visitDraft=currentVisit(form);location.hash='#/visit-report/draft';render();}}
+  if(target.hasAttribute('data-print-report'))window.print();
   if (target.hasAttribute('data-lock')) lock();
+  if(target.hasAttribute('data-return-published')){state.imported=null;$('backup-selection').textContent='';lock();}
   if (target.dataset.scroll) { event.preventDefault(); $(target.dataset.scroll)?.scrollIntoView({ behavior:'smooth', block:'start' }); }
   if (target.dataset.document) await openDocument(target.dataset.document);
-  if (target.dataset.profile) { state.personId = target.dataset.profile; populateProfiles(); location.hash = '#/home'; render(); }
+  if (target.dataset.profile) { state.personId = target.dataset.profile;state.filters={};state.visitDraft=null;populateProfiles(); location.hash = '#/home'; render(); }
   if (target.id === 'export-backup') await exportBackup(target);
 });
 document.addEventListener('change', (event) => {
   if (!state.key) return;
+  const filterKeys={'problem-lifecycle':'problemLifecycle','lab-view':'labView','lab-group-v2':'labGroup','lab-problem':'labProblem','lab-status-v2':'labStatus','lab-favorites':'labFavorites'};
+  if(filterKeys[event.target.id]){state.filters[filterKeys[event.target.id]]=event.target.type==='checkbox'?event.target.checked:event.target.value;render();}
   if (['lab-group','lab-status'].includes(event.target.id)) { const labs = records('labs').filter((l) => (!$('lab-group').value || l.group === $('lab-group').value) && (!$('lab-status').value || l.status === $('lab-status').value)); $('lab-results').innerHTML = labTable(labs); $('lab-count').textContent = `Показателей: ${labs.length}`; }
-  if (event.target.id === 'document-kind') { const docs = records('documents').filter((d) => !event.target.value || d.kind === event.target.value); $('document-results').innerHTML = docs.map(documentCard).join('') || empty('Документов этого типа пока нет.'); }
+  if (event.target.id === 'document-kind') { state.filters.documentKind=event.target.value;render(); }
 });
 
 async function encryptedDocument(doc) {
@@ -335,66 +409,158 @@ async function openDocument(id) {
       $('document-viewer').append(open, note);
     }
     if (doc.mime === 'application/pdf') { const frame = document.createElement('iframe'); frame.src = url; frame.title = doc.title; frame.className = 'pdf-frame'; $('document-viewer').append(frame); }
-    else { const pre = document.createElement('pre'); pre.className = 'document-text'; pre.textContent = new TextDecoder().decode(plain); $('document-viewer').append(pre); }
+    else if(doc.mime.startsWith('image/')) { const img=document.createElement('img');img.src=url;img.alt=doc.title;img.className='journal-photo';$('document-viewer').append(img); }
+    else { const pre = document.createElement('pre'); pre.className = 'document-text'; pre.textContent = new TextDecoder(doc.encoding||'utf-8').decode(plain); $('document-viewer').append(pre); }
   } catch (error) { if (generation === state.generation && request === state.documentRequest) $('document-viewer').textContent = error.name === 'OperationError' ? 'Не удалось проверить целостность документа.' : error.message; }
 }
 $('document-dialog').addEventListener('close', revokeDocuments);
 async function exportBackup(target) {
-  const generation = state.generation, snapshot = structuredClone(state.vault); target.disabled = true; target.textContent = 'Подготовка документов…';
+  const generation = state.generation, snapshot = structuredClone(state.vault),overlaySnapshot=structuredClone(state.overlay),sourceAssets=structuredClone(state.assets); target.disabled = true; target.textContent = 'Подготовка документов…';
   try {
     const assets = {};
-    for (const doc of snapshot.documents) { assets[doc.id] = toBase64(new Uint8Array(await encryptedDocument(doc))); if (generation !== state.generation) return; }
-    const envelope = await encryptJson({ vault:snapshot, assets }, state.key, state.kdf);
+    for (const doc of snapshot.documents) { assets[doc.id] = overlaySnapshot.assets[doc.id]||sourceAssets[doc.id]||toBase64(new Uint8Array(await encryptedDocument(doc))); if (generation !== state.generation) return; }
+    const envelope = await encryptJson({ vault:snapshot, overlay:overlaySnapshot, assets }, state.key, state.kdf);
     if (generation !== state.generation) return;
     const url = URL.createObjectURL(new Blob([JSON.stringify(envelope)], { type:'application/json' }));
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = `health-archive-${today()}.healthvault`; anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 30000); toast('Зашифрованная копия подготовлена. Сохраните пароль отдельно.');
+    state.downloadUrls.add(url);setTimeout(() => {URL.revokeObjectURL(url);state.downloadUrls.delete(url);}, 30000); toast('Зашифрованная копия подготовлена. Сохраните пароль отдельно.');
   } catch (error) { toast(`Копия не создана: ${error.message}`); }
   finally { target.disabled = false; target.textContent = 'Скачать зашифрованную копию ↗'; }
 }
 
-const input = (name,label,options = {}) => `<label class="field ${options.full ? 'full-width' : ''}"><span class="field-label">${esc(label)}</span>${options.area ? `<textarea class="input" name="${name}" rows="${options.rows || 4}" ${options.required ? 'required' : ''} maxlength="${options.max || 12000}"></textarea>` : `<input class="input" name="${name}" type="${options.type || 'text'}" ${options.required ? 'required' : ''} ${options.value ? `value="${esc(options.value)}"` : ''} ${options.accept ? `accept="${options.accept}"` : ''} ${options.type === 'number' ? 'min="0" max="130"' : ''} ${options.type === 'file' ? '' : 'maxlength="500"'}>`}</label>`;
-const select = (name,label,values) => `<label class="field"><span class="field-label">${esc(label)}</span><select class="select" name="${name}">${values.map(([value,text]) => `<option value="${esc(value)}">${esc(text)}</option>`).join('')}</select></label>`;
-function showForm(type) {
-  const titles = { person:'Добавить профиль', problem:'Добавить проблему', lab:'Добавить результат анализа', document:'Добавить документ', timeline:'Добавить событие', action:'Добавить следующий шаг' };
-  if (!titles[type]) return;
-  state.formType = type;
-  const problemSelect = () => select('problemId','Связанный разбор', [['','Без привязки'], ...records('problems').map((p) => [p.id,p.title])]);
-  let fields = '';
-  if (type === 'person') fields = input('name','Имя', { required:true }) + input('age','Возраст (необязательно)', { type:'number' }) + input('summary','Краткое описание', { area:true, full:true });
-  if (type === 'problem') fields = input('title','Название проблемы', { required:true, full:true }) + input('category','Раздел', { value:'Наблюдение' }) + input('status','Статус', { value:'Требует разбора' }) + input('summary','Кратко: симптомы и контекст', { required:true, area:true, full:true }) + input('notes','Известные факты и вопросы к врачу', { area:true, full:true });
-  if (type === 'lab') fields = input('name','Показатель', { required:true }) + input('group','Группа', { required:true, value:'Другие анализы' }) + input('date','Дата сдачи', { type:'date', required:true, value:today() }) + input('value','Результат из бланка', { required:true }) + input('unit','Единицы измерения') + input('reference','Референс из бланка') + select('status','Оценка по бланку',[['unreviewed','Не оценено'],['normal','В референсе'],['high','Выше референса'],['low','Ниже референса'],['calculated','Расчётный показатель']]) + problemSelect() + input('interpretation','Комментарий (без автоматической диагностики)', { area:true, full:true });
-  if (type === 'document') fields = input('title','Название документа', { required:true, full:true }) + input('date','Дата документа', { type:'date', required:true, value:today() }) + select('kind','Тип',Object.entries(kindLabel)) + problemSelect() + input('file','Файл PDF или текст (до 20 МБ)', { required:true, type:'file', accept:'.pdf,.md,.txt,application/pdf,text/plain,text/markdown', full:true }) + input('description','Краткое описание', { area:true, full:true });
-  if (type === 'timeline') fields = input('title','Событие', { required:true, full:true }) + input('date','Дата', { type:'date', required:true, value:today() }) + problemSelect() + input('description','Что произошло', { required:true, area:true, full:true });
-  if (type === 'action') fields = input('title','Следующий шаг', { required:true, full:true }) + input('timing','Срок или условие выполнения', { required:true }) + select('priority','Приоритет',[['next','Ближайший шаг'],['planned','Планово'],['conditional','По показаниям']]) + problemSelect() + input('description','Что сделать и зачем', { required:true, area:true, full:true });
-  $('record-title').textContent = titles[type]; $('record-fields').innerHTML = fields; $('record-error').textContent = ''; $('record-dialog').showModal();
+const { showForm, showEdit } = installRecordController({state,$,records,toast,render,populateProfiles,persistOverlay});
+
+function viewContext(){return {vault:state.vault,overlay:state.overlay,personId:state.personId,esc,dateText,records,getProblem,documentCard,problemCard,actionList,model,filters:state.filters,visitDraft:state.visitDraft};}
+function problemControls(id){
+  const p=getProblem(id);if(!p)return '';
+  return `<div class="record-tools"><span class="badge">${esc(model.LIFECYCLE_LABELS[p.lifecycle]||'Активна')}</span><span class="badge">${esc(model.CLINICAL_KIND_LABELS[p.clinicalKind]||'Тип не указан')}</span><button class="button button-primary button-small" type="button" data-lifecycle="${esc(id)}">Статус / закрытие</button><button class="button button-secondary button-small" type="button" data-edit="problems:${esc(id)}">Изменить запись</button>${routeLink(`history/problems/${encodeURIComponent(id)}`,'История изменений','button button-secondary button-small')}</div>`;
 }
-$('record-form').addEventListener('submit', async (event) => {
-  event.preventDefault(); if (!state.key || state.busy) return;
-  const form = event.currentTarget, fd = new FormData(form), get = (name) => String(fd.get(name) || '').trim();
-  const type = state.formType, id = newId(), record = { id, local:true, personId:state.personId }, candidate = structuredClone(state.overlay);
-  const generation = state.generation; state.busy = true; const submit = form.querySelector('[type="submit"]'); submit.disabled = true;
-  try {
-    let collection;
-    if (type === 'person') { collection = 'people'; Object.assign(record, { name:get('name'), initials:get('name').split(/\s+/).slice(0,2).map((s) => s[0]).join(''), age:get('age') ? Number(get('age')) : null, summary:get('summary'), updatedAt:today() }); delete record.personId; }
-    else if (type === 'problem') { collection = 'problems'; Object.assign(record, { title:get('title'), category:get('category') || 'Наблюдение', status:get('status') || 'Требует разбора', tone:'violet', summary:get('summary'), updatedAt:today(), sections:[{ title:'Записано пользователем', paragraphs:[get('notes') || get('summary')], bullets:[] }], labIds:[], documentIds:[], sourceIds:[] }); }
-    else if (type === 'lab') { collection = 'labs'; Object.assign(record, { name:get('name'), group:get('group'), date:get('date'), value:get('value'), unit:get('unit'), reference:get('reference') || 'Не указан', status:get('status'), interpretation:get('interpretation') || 'Комментарий не добавлен. Требует оценки в клиническом контексте.', problemIds:get('problemId') ? [get('problemId')] : [] }); }
-    else if (type === 'document') {
-      collection = 'documents'; const file = fd.get('file'); if (!(file instanceof File) || !file.size || file.size > 20 * 1024 * 1024) throw new Error('Выберите непустой PDF или текстовый файл до 20 МБ.');
-      const extension = file.name.split('.').pop().toLowerCase(); if (!['pdf','md','txt'].includes(extension)) throw new Error('Поддерживаются PDF, MD и TXT.');
-      const data = await file.arrayBuffer(); if (generation !== state.generation) return;
-      if (extension === 'pdf' && !new TextDecoder().decode(data.slice(0,5)).startsWith('%PDF-')) throw new Error('Файл не похож на PDF.');
-      candidate.assets[id] = toBase64(new Uint8Array(await encryptAsset(data, state.key)));
-      Object.assign(record, { title:get('title'), date:get('date'), kind:get('kind'), fileName:file.name, mime:extension === 'pdf' ? 'application/pdf' : 'text/plain', description:get('description'), size:file.size, problemIds:get('problemId') ? [get('problemId')] : [] });
+function relatedCare(id){
+  const labs=records('labs').filter(l=>(l.problemIds||[]).includes(id)&&l.reviewed===false),meds=records('medications').filter(m=>(m.problemIds||[]).includes(id)),symptoms=records('symptoms').filter(s=>s.problemId===id);
+  return `${labs.length?`<section class="callout"><h2>Новые результаты: ${labs.length}</h2><p>Появились ещё не разобранные результаты. Проверьте, меняют ли они прежние выводы.</p>${labs.map(l=>routeLink(`lab/${encodeURIComponent(l.id)}`,esc(l.name),'button button-secondary button-small')).join('')}</section>`:''}<section class="panel"><h2>Лечение и наблюдения</h2><p>Записей о препаратах: ${meds.length}. Записей симптомов: ${symptoms.length}.</p>${routeLink('care','Открыть журнал →','button button-secondary')}<button class="button button-secondary" data-add="symptom" type="button">Добавить наблюдение</button></section>`;
+}
+function problemNotes(id){const notes=getProblem(id)?.notesEntries||[];return notes.length?`<section class="panel prose"><h2>Записи пользователя</h2>${notes.map(n=>`<article><p class="eyebrow">${dateText(n.at)}</p><p>${esc(n.text)}</p></article>`).join('')}</section>`:'';}
+function setSyncStatus(message){state.syncStatus=message;const footer=$('save-status');if(footer)footer.textContent=`${message} · Хранение и копии ↗`;const detail=$('sync-state');if(detail)detail.textContent=message;}
+function syncPanel(){return `<section class="panel prose"><p class="eyebrow accent-cyan">СОХРАНЕНИЕ МЕЖДУ УСТРОЙСТВАМИ</p><h2>Личное зашифрованное облако</h2><p id="sync-state">${esc(state.syncStatus)}</p><p>Подключите личное хранилище в отдельном окне через вход в свой аккаунт. Сервис получает только зашифрованные дополнения; пароль базы и открытые данные остаются на устройстве.</p><div class="record-tools"><button class="button button-primary" id="connect-sync" type="button">Подключить и синхронизировать</button><button class="button button-secondary" id="sync-now" type="button">Синхронизировать сейчас</button><button class="button button-secondary" id="disconnect-sync" type="button">Отключить облако</button></div><p class="section-note">Пока окно хранилища открыто, новые изменения сохраняются в нём автоматически. После закрытия окна записи продолжают сохраняться в этом браузере. На другом устройстве откройте базу и подключите то же личное хранилище.</p><p class="section-note">Исходные опубликованные документы доступны на сайте. Новые вложения синхронизируются вместе с зашифрованными дополнениями. Лимит одной облачной копии — 60 МБ шифротекста.</p></section>`;}
+async function decryptCloud(envelope){
+  if(envelope?.kdf?.salt!==state.kdf.salt||envelope?.kdf?.iterations!==state.kdf.iterations)throw Error('Облачная копия использует другой ключ. Локальные данные сохранены.');
+  return model.normalizeOverlay(await decryptJson(envelope,state.key));
+}
+function showSyncConflict(local,remote,etag,scope,conflicts){
+  state.conflict={local,remote,etag,scope};
+  const localVault=model.mergeVault(state.base,local),remoteVault=model.mergeVault(state.base,remote),labels={title:'Название',name:'Название',summary:'Описание',lifecycle:'Актуальность',clinicalKind:'Тип записи',value:'Результат',reference:'Референс',date:'Дата',done:'Выполнено',notes:'Примечание',description:'Описание',dose:'Доза',frequency:'Режим'};
+  const shown=value=>{if(value===null||value===undefined||value==='')return 'Не указано';if(typeof value==='boolean')return value?'Да':'Нет';return typeof value==='object'?JSON.stringify(value).slice(0,600):String(value).slice(0,600);};
+  $('sync-conflict-list').innerHTML=`<p>Пересечений: ${conflicts.length}. Выбор ниже относится ко всей копии. Обе версии можно будет скачать в разделе хранения.</p>${conflicts.slice(0,12).map(c=>{const collection=c.collection||'documents',id=c.recordId||c.id,l=localVault[collection]?.find(x=>x.id===id),r=remoteVault[collection]?.find(x=>x.id===id),title=l?.title||l?.name||r?.title||r?.name||'Запись';return `<article class="panel"><h3>${esc(title)}${c.field?' · '+esc(labels[c.field]||c.field):''}</h3><dl><dt>На устройстве</dt><dd>${esc(c.type==='asset'?'Зашифрованное вложение этой версии':shown(c.field?l?.[c.field]:l?.summary||l?.title||l?.name||c.local))}</dd><dt>В облаке</dt><dd>${esc(c.type==='asset'?'Другая версия зашифрованного вложения':shown(c.field?r?.[c.field]:r?.summary||r?.title||r?.name||c.remote))}</dd></dl></article>`;}).join('')}`;
+  if(!$('sync-conflict-dialog').open)$('sync-conflict-dialog').showModal();setSyncStatus('Конфликт версий — выберите копию');
+}
+async function synchronize(connect=false){
+  if(!state.key||state.syncBusy)return;
+  if(state.backupSession){toast('Открыта отдельная резервная копия. Вернитесь в основную базу для синхронизации.');return;}
+  let ready=Promise.resolve();
+  if(connect){if(!state.sync)state.sync=createSyncClient({origin:SYNC_ORIGIN,onStatus:s=>{setSyncStatus(s.message);}});ready=state.sync.connect();}
+  else if(!state.sync?.connected){setSyncStatus('Сохранено в браузере — подключите личное хранилище');return;}
+  const generation=state.generation;state.syncBusy=true;
+  try{
+    await ready;if(generation!==state.generation)return;const scope=await syncScope(state.kdf);
+    for(let attempt=0;attempt<2;attempt++){
+      const remote=await state.sync.read(scope);if(generation!==state.generation)return;
+      const remoteOverlay=remote.envelope?await decryptCloud(remote.envelope):emptyOverlay();if(generation!==state.generation)return;
+      const merged=model.mergeOverlays(state.overlay,remoteOverlay);state.syncEtag=remote.etag;
+      if(merged.conflicts.length){showSyncConflict(state.overlay,remoteOverlay,remote.etag,scope,merged.conflicts);return;}
+      await persistOverlay(merged.overlay,{sync:false});if(generation!==state.generation)return;
+      const revision=state.localRevision,envelope=await encryptJson(state.overlay,state.key,state.kdf);if(generation!==state.generation)return;
+      try{
+        const saved=await state.sync.write(scope,envelope,remote.etag);if(generation!==state.generation)return;state.syncEtag=saved.etag;
+        setSyncStatus(revision===state.localRevision?'Синхронизировано с личным облаком':'Есть новые изменения в браузере');
+        if(revision!==state.localRevision){clearTimeout(state.syncTimer);state.syncTimer=setTimeout(()=>void synchronize(false),1400);}
+        populateProfiles();render();return;
+      }catch(error){if(error.code!=='conflict'||attempt===1)throw error;}
     }
-    else if (type === 'timeline') { collection = 'timeline'; Object.assign(record, { title:get('title'), date:get('date'), description:get('description'), type:'Запись', problemId:get('problemId') || undefined }); }
-    else if (type === 'action') { collection = 'actions'; Object.assign(record, { title:get('title'), timing:get('timing'), priority:get('priority'), description:get('description'), problemId:get('problemId') || undefined }); }
-    if (!collection) throw new Error('Неизвестный тип записи.');
-    candidate[collection].push(record);
-    if (type === 'document') candidate.timeline.push({ id:newId(), personId:state.personId, date:get('date'), title:get('title'), description:'Добавлен документ в локальную базу.', type:get('kind'), documentId:id, local:true });
-    await persistOverlay(candidate); if (generation !== state.generation) return;
-    if (type === 'person') { state.personId = id; populateProfiles(); location.hash = '#/home'; }
-    $('record-dialog').close(); render(); toast('Запись сохранена зашифрованной в этом браузере. Сделайте резервную копию.');
-  } catch (error) { if (generation === state.generation) $('record-error').textContent = error.message || 'Не удалось сохранить запись.'; }
-  finally { state.busy = false; submit.disabled = false; }
+  }catch(error){if(generation===state.generation){setSyncStatus(error.code==='conflict'?'Облачная версия изменилась — повторите синхронизацию':'Сохранено в браузере — облако недоступно');toast(error.message||'Не удалось синхронизировать. Локальная копия сохранена.');}}
+  finally{if(generation===state.generation)state.syncBusy=false;}
+}
+function putRecovery(key,envelope){return new Promise((resolve,reject)=>{const tx=state.database.transaction('vaults','readwrite');tx.objectStore('vaults').put(envelope,key);tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);});}
+async function chooseSyncVersion(choice){
+  if(!state.conflict||state.busy)return;const conflict=state.conflict,generation=state.generation;state.busy=true;
+  try{
+    await state.persistChain?.catch(()=>{});conflict.local=state.overlay;
+    for(const side of ['local','remote']){const encrypted=await encryptJson(conflict[side],state.key,state.kdf);if(generation!==state.generation)return;await putRecovery(`recovery:${new Date().toISOString()}:${side}`,encrypted);}
+    const selected=choice==='remote'?conflict.remote:conflict.local;
+    await persistOverlay(selected,{sync:false,replace:true});if(generation!==state.generation)return;
+    if(choice==='local'){const envelope=await encryptJson(selected,state.key,state.kdf);const saved=await state.sync.write(conflict.scope,envelope,conflict.etag);if(generation!==state.generation)return;state.syncEtag=saved.etag;}
+    state.conflict=null;$('sync-conflict-dialog').close();populateProfiles();render();setSyncStatus('Версия выбрана; обе предыдущие копии сохранены');toast('Обе прежние зашифрованные копии сохранены в этом браузере.');
+  }catch(error){if(generation===state.generation)toast(error.message||'Не удалось сохранить выбранную версию. Обе копии сохранены.');}
+  finally{if(generation===state.generation)state.busy=false;}
+}
+async function patchRecord(collection,id,fields,reason){
+  if(state.busy)return;const generation=state.generation;
+  try{await persistOverlay(model.editOverlay(state.overlay,state.vault,collection,id,fields,reason));if(generation===state.generation)render();}catch(error){toast(error.message);}
+}
+function currentVisit(form){const fd=new FormData(form);return {id:newId(),personId:state.personId,title:String(fd.get('title')||'Подготовка к приёму').trim(),date:String(fd.get('date')||today()),problemIds:fd.getAll('problemIds').map(String),complaints:String(fd.get('complaints')||'').trim(),questions:String(fd.get('questions')||'').trim(),local:true,createdAt:new Date().toISOString()};}
+async function saveVisit(form){if(state.busy)return;const generation=state.generation,button=form.querySelector('[type="submit"]'),visit=currentVisit(form);state.busy=true;button.disabled=true;try{await persistOverlay(model.addRecord(state.overlay,'visits',visit));if(generation!==state.generation)return;state.visitDraft=null;state.skipVisitCapture=true;render();toast('Подготовка к приёму сохранена.');}finally{button.disabled=false;if(generation===state.generation)state.busy=false;}}
+function exportVisit(id){
+  const visit=records('visits').find(v=>v.id===id)||state.visitDraft;if(!visit)return;
+  const article=views.renderVisitReport(viewContext(),visit),html=`<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${esc(visit.title)}</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:960px;margin:30px auto;padding:20px;color:#182234}table{border-collapse:collapse;width:100%}td,th{padding:8px;border:1px solid #ccc;text-align:left}button,.record-tools,.section-note.print-note{display:none}a{color:inherit}section{margin:20px 0}h1,h2,h3{line-height:1.25}</style>${article}</html>`;
+  const url=URL.createObjectURL(new Blob([html],{type:'text/html;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download=`visit-summary-${visit.date||today()}.html`;a.click();state.downloadUrls.add(url);setTimeout(()=>{URL.revokeObjectURL(url);state.downloadUrls.delete(url);},30000);toast('Скачана обычная незашифрованная сводка для приёма.');
+}
+function readRecoveryStore(){return new Promise((resolve,reject)=>{const tx=state.database.transaction('vaults','readonly'),store=tx.objectStore('vaults'),keys=store.getAllKeys(),values=store.getAll();tx.oncomplete=()=>resolve(keys.result.map((key,i)=>({key,envelope:values.result[i]})).filter(v=>typeof v.key==='string'&&v.key.startsWith('recovery:')));tx.onerror=()=>reject(tx.error);});}
+async function showRecoveryVersions(){
+  const generation=state.generation;
+  try{const entries=await readRecoveryStore();if(generation!==state.generation)return;const list=$('recovery-list');if(list)list.innerHTML=entries.length?`<ul>${entries.slice().reverse().map(entry=>`<li><button class="button button-secondary button-small" data-recovery="${esc(entry.key)}" type="button">Скачать версию ${esc(entry.key.slice(9,28))} · ${entry.key.endsWith(':remote')?'облако':'устройство'}</button></li>`).join('')}</ul>`:'<p class="section-note">Сохранённых конфликтующих версий нет.</p>';}catch(error){toast(error.message||'Не удалось прочитать версии.');}
+}
+async function downloadRecovery(key){
+  const generation=state.generation;
+  try{
+    const entry=(await readRecoveryStore()).find(v=>v.key===key);if(!entry)throw Error('Сохранённая версия не найдена.');
+    const overlay=model.normalizeOverlay(await decryptJson(entry.envelope,state.key)),vault=model.mergeVault(state.base,overlay),assets={};
+    for(const doc of vault.documents){
+      const local=overlay.assets[doc.id]||state.assets[doc.id];
+      if(local)assets[doc.id]=local;
+      else{if(!/^assets\/[a-zA-Z0-9_-]+\.bin$/.test(doc.asset||''))throw Error('Нет вложения для сохранённой версии.');const response=await fetch(doc.asset);if(!response.ok)throw Error('Не удалось загрузить исходный документ для копии.');assets[doc.id]=toBase64(await response.arrayBuffer());}
+      if(generation!==state.generation)return;
+    }
+    const envelope=await encryptJson({vault,overlay,assets},state.key,state.kdf);if(generation!==state.generation)return;
+    const url=URL.createObjectURL(new Blob([JSON.stringify(envelope)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download=`health-recovery-${today()}.healthvault`;a.click();state.downloadUrls.add(url);setTimeout(()=>{URL.revokeObjectURL(url);state.downloadUrls.delete(url);},30000);toast('Зашифрованная сохранённая версия скачана вместе с документами.');
+  }catch(error){if(generation===state.generation)toast(error.message||'Не удалось скачать сохранённую версию.');}
+}
+
+function openImport(){state.importAbort?.abort();state.importRequest=(state.importRequest||0)+1;state.importDraft=null;state.importInputFile=null;$('import-document-file').disabled=false;$('extract-document').disabled=false;$('import-document-file').value='';$('import-progress').textContent='';$('import-review-form').hidden=true;$('import-review-fields').replaceChildren();$('import-error').textContent='';$('import-dialog').showModal();}
+function importReviewMarkup(result,file,existing=null){
+  const fields=(name,label,value='',type='text',required=false)=>`<label class="field"><span class="field-label">${esc(label)}</span><input class="input" type="${type}" name="${name}" value="${esc(value)}" ${required?'required':''}></label>`;
+  return `<div class="form-grid">${fields('documentTitle','Название документа',file.name,'text',true)}${fields('documentDate','Дата документа — проверьте','', 'date')}<label class="field"><span class="field-label">Группа показателей</span><input name="group" class="input" value="Другие анализы"></label><label class="field"><span class="field-label">Связанные проблемы</span><select class="select" name="problemId"><option value="">Без привязки</option>${records('problems').map(p=>`<option value="${esc(p.id)}">${esc(p.title)}</option>`).join('')}</select></label></div><div class="callout"><p>${result.issues.map(esc).join(' ')}</p><p>Строки не выбраны автоматически. Проверьте каждую перед сохранением; можно сохранить только документ.</p></div><label class="field"><span class="field-label">Извлечённый текст — можно исправить и разобрать заново</span><textarea class="input" id="import-source-text" rows="6" maxlength="2097152">${esc(result.text)}</textarea></label><button class="button button-secondary" id="reparse-import" type="button">Разобрать исправленный текст</button><div class="import-rows">${result.rows.slice(0,200).map((row,index)=>`<fieldset class="panel import-row"><legend><label class="check-field"><input type="checkbox" name="include" value="${index}"> Проверил строку ${index+1}${row.duplicateOf!==undefined?' · возможный повтор':''}</label></legend><div class="form-grid">${fields(`name_${index}`,'Показатель',row.name)}${fields(`value_${index}`,'Результат',row.value)}${fields(`unit_${index}`,'Единицы',row.unit)}${fields(`reference_${index}`,'Референс из бланка',row.reference)}${fields(`date_${index}`,'Дата забора / записи — проверьте',row.date||'','date')}${fields(`dateContext_${index}`,'Основание даты',row.dateContext||'Дата не распознана; уточнить по бланку')}</div><details><summary>Исходная строка</summary><p>${esc(row.sourceLine)}</p></details></fieldset>`).join('')}</div>${result.rows.length>200?'<p class="callout">Показаны первые 200 строк. Разделите большой документ на части.</p>':''}`;
+}
+async function runExtraction(file,existingDocument=null){
+  if(!state.key||state.busy)return;if(!file){$('import-progress').textContent='Выберите файл.';return;}state.importInputFile=file;
+  const generation=state.generation,request=(state.importRequest||0)+1,abort=new AbortController();state.importRequest=request;state.importAbort=abort;$('extract-document').disabled=true;$('import-document-file').disabled=true;$('import-progress').textContent='Извлечение на устройстве…';
+  try{const result=await extractDocument(file,{signal:abort.signal,onProgress:p=>{if(generation===state.generation&&request===state.importRequest)$('import-progress').textContent=p.message||'Распознавание…';}});if(generation!==state.generation||abort.signal.aborted)return;const hash=existingDocument?.fileHash||[...new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer()))].map(v=>v.toString(16).padStart(2,'0')).join('');if(generation!==state.generation||abort.signal.aborted)return;const existing=existingDocument||records('documents').find(d=>d.fileHash===hash);state.importDraft={file,result,personId:state.personId,hash,existingDocumentId:existing?.id};$('import-review-fields').innerHTML=importReviewMarkup(result,file,existing);if(existing)$('import-review-fields').insertAdjacentHTML('afterbegin',`<p class="callout">Файл уже сохранён: ${esc(existing.title)}. Будут добавлены только выбранные новые показатели; копия файла не создаётся.</p>`);$('import-review-form').hidden=false;$('import-progress').textContent=`Найдено предложений: ${result.rows.length}. Проверьте их перед сохранением.`;}
+  catch(error){if(generation===state.generation)$('import-progress').textContent=error.name==='AbortError'?'Распознавание отменено.':error.message;}
+  finally{if(request===state.importRequest){$('extract-document').disabled=false;$('import-document-file').disabled=false;}}
+}
+$('extract-document').addEventListener('click',()=>void runExtraction($('import-document-file').files[0]||state.importInputFile));
+$('import-dialog').addEventListener('close',()=>state.importAbort?.abort());
+document.addEventListener('click',event=>{if(event.target.id==='reparse-import'&&state.importDraft){try{const text=$('import-source-text').value,result=parseLabText(text);state.importDraft.result=result;$('import-review-fields').innerHTML=importReviewMarkup(result,state.importDraft.file);}catch(error){$('import-error').textContent=error.message;}}});
+$('import-review-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(!state.key||!state.importDraft||state.busy)return;
+  const generation=state.generation,draft=state.importDraft,fd=new FormData(event.currentTarget),get=name=>String(fd.get(name)||'').trim(),submit=event.currentTarget.querySelector('[type="submit"]');
+  state.busy=true;submit.disabled=true;$('import-error').textContent='';
+  try{
+    if(draft.personId!==state.personId)throw Error('Выбран другой профиль. Откройте импорт заново.');
+    const existing=records('documents').find(d=>d.fileHash===draft.hash||d.id===draft.existingDocumentId),attachment=existing?{record:existing}:await prepareAttachment(draft.file,{key:state.key,personId:state.personId,documents:records('documents'),metadata:{title:get('documentTitle')||draft.file.name,date:get('documentDate')||null,encoding:draft.result.encoding||'utf-8',description:'Загружено с проверкой извлечённых значений.',kind:'analysis',problemIds:get('problemId')?[get('problemId')]:[]}});
+    if(generation!==state.generation)return;let candidate=model.normalizeOverlay(state.overlay);
+    if(!existing){candidate=model.addRecord(candidate,'documents',attachment.record);candidate.assets[attachment.record.id]=attachment.encrypted;}
+    const newLink=existing&&get('problemId')&&!(existing.problemIds||[]).includes(get('problemId'));
+    if(newLink)candidate=model.editOverlay(candidate,state.vault,'documents',existing.id,{problemIds:[...(existing.problemIds||[]),get('problemId')]},'Документ связан с ещё одной проблемой при разборе');
+    if(existing&&!newLink&&!fd.getAll('include').length){$('import-dialog').close();state.importDraft=null;toast('Документ уже сохранён; новые показатели не выбраны.');return;}
+    for(const rawIndex of fd.getAll('include')){
+      const index=Number(rawIndex);if(!Number.isInteger(index)||!draft.result.rows[index])throw Error('Неверная строка импорта.');
+      const date=get(`date_${index}`),name=get(`name_${index}`),value=get(`value_${index}`);if(!date||!name||!value)throw Error(`У выбранной строки ${index+1} заполните показатель, значение и дату.`);
+      const lab={id:newId(),personId:state.personId,name,value,date,unit:get(`unit_${index}`),reference:get(`reference_${index}`)||'Не указан',dateContext:get(`dateContext_${index}`),group:get('group')||'Другие анализы',status:'unreviewed',reviewed:false,interpretation:'Значение проверено при переносе из бланка. Медицинская интерпретация ещё не добавлена.',documentId:attachment.record.id,problemIds:get('problemId')?[get('problemId')]:[],local:true,createdAt:new Date().toISOString()};
+      Object.assign(lab,{low:null,high:null,...model.referenceBounds(lab.reference)});
+      if(model.identifyDuplicates([...records('labs'),...candidate.labs],lab).length)throw Error(`Строка ${index+1} повторяет уже сохранённый результат. Снимите её выбор.`);
+      candidate=model.addRecord(candidate,'labs',lab);
+    }
+    candidate=model.addRecord(candidate,'timeline',{id:newId(),personId:state.personId,title:attachment.record.title,date:attachment.record.date||today(),description:'Загружен документ; сохранены только выбранные и проверенные показатели.',type:'analysis',documentId:attachment.record.id,local:true});
+    await persistOverlay(candidate);if(generation!==state.generation)return;$('import-dialog').close();state.importDraft=null;render();toast('Документ и выбранные показатели сохранены.');
+  }catch(error){if(generation===state.generation)$('import-error').textContent=error.message||'Не удалось сохранить импорт.';}
+  finally{submit.disabled=false;if(generation===state.generation)state.busy=false;}
 });

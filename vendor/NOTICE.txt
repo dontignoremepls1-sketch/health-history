@@ -1,0 +1,19 @@
+Local document extraction runtime
+
+PDF.js 6.4.299 (Mozilla), legacy browser distribution, Apache-2.0.
+https://github.com/mozilla/pdf.js
+pdfjs/LICENSE.txt and decoder license files retain the relevant notices.
+
+Tesseract.js 7.0.0 and its installed Tesseract.js-core 7.x, Apache-2.0.
+https://github.com/naptha/tesseract.js
+ocr/LICENSE-tesseract.txt, LICENSE-core.txt and worker-LICENSE.txt retain notices.
+Only the three LSTM core variants selected by OEM=1 are included.
+
+Russian and English LSTM models from the official Tesseract.js language repository:
+https://github.com/naptha/tessdata/tree/gh-pages/4.0.0_best_int
+ocr/lang/LICENSE.txt retains the Apache-2.0 language-data license.
+
+All runtime modules, workers, WASM and language models are served by this website.
+No medical document, extracted text or image is sent to an OCR provider.
+Default CDN strings inside upstream bundles are overridden with local URLs.
+Source maps, samples, package caches and development dependencies are excluded.

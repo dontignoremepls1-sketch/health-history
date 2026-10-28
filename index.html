@@ -7,11 +7,12 @@
   <meta name="theme-color" content="#03060b">
   <meta name="robots" content="noindex, nofollow, noarchive">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-src blob:; object-src blob:; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self'; connect-src 'self'; img-src 'self' blob: data:; frame-src blob:; object-src blob:; base-uri 'none'; form-action 'none'">
   <meta name="description" content="Личная медицинская база с зашифрованными данными и документами.">
   <title>Медицинская база</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="v2.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
@@ -47,7 +48,7 @@
       <a class="brand" href="#/home"><span class="brand-mark" aria-hidden="true">+</span><span class="brand-text">HEALTH / ARCHIVE</span></a>
       <button id="menu-toggle" class="icon-button" type="button" aria-label="Меню" aria-controls="header-nav" aria-expanded="false">☰</button>
       <nav id="header-nav" class="header-nav" aria-label="Разделы">
-        <a href="#/home">Обзор</a><a href="#/problems">Проблемы</a><a href="#/labs">Анализы</a><a href="#/documents">Документы</a><a href="#/timeline">История</a>
+        <a href="#/home">Актуальное</a><a href="#/problems">Проблемы</a><a href="#/labs">Анализы</a><a href="#/care">Лечение и симптомы</a><a href="#/documents">Документы</a><a href="#/visit">Для приёма</a><a href="#/timeline">История</a>
       </nav>
       <div class="header-tools">
         <label class="sr-only" for="profile-select">Выбрать профиль</label><select id="profile-select" class="select"></select>
@@ -56,11 +57,13 @@
       </div>
     </div></header>
     <main id="main" class="shell" tabindex="-1"></main>
-    <footer class="shell site-footer"><span>HEALTH / ARCHIVE</span><span>Материалы для подготовки к приёму. Решения о лечении — с врачом.</span><a href="#/settings">Хранение и копии ↗</a></footer>
+    <footer class="shell site-footer"><span>HEALTH / ARCHIVE</span><span>Материалы для подготовки к приёму. Решения о лечении — с врачом.</span><a href="#/settings" id="save-status">Локальная копия · Хранение и копии ↗</a></footer>
   </div>
 
-  <dialog id="record-dialog" class="dialog"><div class="dialog-head"><h2 id="record-title">Добавить запись</h2><button type="button" class="icon-button" data-close="record-dialog" aria-label="Закрыть">×</button></div><form id="record-form"><div id="record-fields" class="dialog-body form-grid"></div><p id="record-error" class="form-error" role="alert"></p><div class="dialog-actions"><span class="section-note">Зашифровано • сохранится в этом браузере</span><button type="button" class="button button-secondary" data-close="record-dialog">Отмена</button><button type="submit" class="button button-primary">Сохранить запись</button></div></form></dialog>
+  <dialog id="record-dialog" class="dialog"><div class="dialog-head"><h2 id="record-title">Добавить запись</h2><button type="button" class="icon-button" data-close="record-dialog" aria-label="Закрыть">×</button></div><form id="record-form"><div id="record-fields" class="dialog-body form-grid"></div><p id="record-error" class="form-error" role="alert"></p><div class="dialog-actions"><span class="section-note">Зашифровано • статус сохранения — внизу страницы</span><button type="button" class="button button-secondary" data-close="record-dialog">Отмена</button><button type="submit" class="button button-primary">Сохранить запись</button></div></form></dialog>
   <dialog id="document-dialog" class="dialog document-dialog"><div class="dialog-head"><h2 id="document-title">Документ</h2><button type="button" class="icon-button" data-close="document-dialog" aria-label="Закрыть">×</button></div><div id="document-viewer" class="dialog-body"></div></dialog>
+  <dialog id="import-dialog" class="dialog"><div class="dialog-head"><h2>Добавить документ и результаты</h2><button type="button" class="icon-button" data-close="import-dialog" aria-label="Закрыть">×</button></div><div class="dialog-body"><p class="section-note">Извлечение выполняется на устройстве. Перед сохранением проверьте названия, даты, единицы и все значения.</p><label class="field"><span class="field-label">PDF, изображение, CSV или текст — до 20 МБ</span><input id="import-document-file" class="input" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.csv,.txt,.md"></label><button id="extract-document" class="button button-secondary" type="button">Извлечь данные</button><p id="import-progress" role="status"></p><form id="import-review-form" hidden><div id="import-review-fields"></div><p id="import-error" class="form-error" role="alert"></p><button type="submit" class="button button-primary">Сохранить проверенные данные</button></form></div></dialog>
+  <dialog id="sync-conflict-dialog" class="dialog"><div class="dialog-head"><h2>Есть разные версии записей</h2><button class="icon-button" data-close="sync-conflict-dialog" aria-label="Закрыть" type="button">×</button></div><div class="dialog-body"><p>Изменения с устройств пересекаются. Обе зашифрованные версии будут сохранены в этом браузере перед выбором; автоматической перезаписи не было.</p><div id="sync-conflict-list"></div><div class="dialog-actions"><button class="button button-secondary" type="button" data-sync-choice="remote">Взять облачную версию</button><button class="button button-primary" type="button" data-sync-choice="local">Сохранить эту версию в облако</button></div></div></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
   <noscript><p class="shell callout">Для расшифровки базы нужен JavaScript. Все данные открываются в вашем браузере.</p></noscript>
 </body>
