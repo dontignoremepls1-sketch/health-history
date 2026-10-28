@@ -356,7 +356,7 @@ dialog::backdrop { background: rgba(1, 4, 10, .78); backdrop-filter: blur(8px); 
   .header-inner { gap: 10px; }
   .header-tools { margin-left: auto; }
   #menu-toggle { display: inline-grid; }
-  .header-nav { order: 3; display: none; flex: 1 0 100%; justify-content: flex-start; padding-top: 10px; border-top: 1px solid var(--line); }
+  .header-nav { order: 3; display: none; flex: 1 0 100%; flex-wrap: wrap; justify-content: flex-start; padding-top: 10px; border-top: 1px solid var(--line); }
   .header-nav.is-open, .header-nav[data-open="true"] { display: flex; }
   .header-nav a, .header-nav button { flex: 1; min-height: 44px; padding-inline: 9px; font-size: 11px; }
   .header-tools .input { width: 190px; }

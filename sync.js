@@ -11,40 +11,49 @@ export function createSyncClient({ origin, onStatus = () => {} }) {
   const parsed = new URL(origin);
   if (parsed.protocol !== 'https:') throw new Error('Синхронизация требует HTTPS.');
   const targetOrigin = parsed.origin;
-  let popup = null, nonce = null, connected = false, connectPromise = null, readyResolve = null, readyReject = null, handshakeTimer = null, handshakeTimeout = null, closedTimer = null;
+  let popup = null, nonce = null, connected = false, connectPromise = null, readyResolve = null, readyReject = null, handshakeTimer = null, handshakeWarning = null, handshakeTimeout = null, closedTimer = null;
   const pending = new Map();
   const status = (state,message) => onStatus({ state,message });
   const error = (message,code) => Object.assign(new Error(message), code ? { code } : {});
-  const cleanupHandshake = () => { clearInterval(handshakeTimer); clearTimeout(handshakeTimeout); handshakeTimer = handshakeTimeout = null; };
+  const cleanupHandshake = () => { clearInterval(handshakeTimer); clearTimeout(handshakeWarning); clearTimeout(handshakeTimeout); handshakeTimer = handshakeWarning = handshakeTimeout = null; };
   function receive(event) {
     if (!validBridgeEvent(event,targetOrigin,popup,nonce)) return;
     const data = event.data;
-    if (data.type === 'ready') { connected = true; cleanupHandshake(); status('connected','Личное хранилище подключено.'); readyResolve?.(); readyResolve = readyReject = null; return; }
+    if (data.type === 'ready') {
+      // A late reply after failure or cancellation must not revive an abandoned session.
+      if (!readyResolve) return;
+      connected = true; cleanupHandshake(); status('connected','Личное хранилище подключено.'); readyResolve(); readyResolve = readyReject = null; return;
+    }
     if (data.type !== 'result' || !pending.has(data.id)) return;
     const operation = pending.get(data.id); pending.delete(data.id); clearTimeout(operation.timer);
     if (data.ok) operation.resolve(data.result);
-    else operation.reject(error(data.error || 'Синхронизация не завершена.', data.conflict ? 'conflict' : 'sync_failed'));
+    else {
+      const message = data.error || 'Синхронизация не завершена. Локальная копия сохранена.';
+      operation.reject(error(message, data.conflict ? 'conflict' : 'sync_failed'));
+      if (!data.conflict) disconnect(message,'sync_failed','error');
+    }
   }
   window.addEventListener('message',receive);
-  function disconnect(message = 'Окно синхронизации закрыто. Если вход уже выполнен, нажмите «Подключить» ещё раз.') {
+  function disconnect(message = 'Окно синхронизации закрыто. Локальные записи сохранены. Если вход уже выполнен, нажмите «Подключить» ещё раз.', code = 'closed', statusName = 'closed') {
     connected = false; cleanupHandshake(); clearInterval(closedTimer); closedTimer = null;
-    readyReject?.(error(message,'closed')); readyResolve = readyReject = null; connectPromise = null;
-    for (const operation of pending.values()) { clearTimeout(operation.timer); operation.reject(error(message,'closed')); }
-    pending.clear(); status('closed',message);
+    readyReject?.(error(message,code)); readyResolve = readyReject = null; connectPromise = null;
+    for (const operation of pending.values()) { clearTimeout(operation.timer); operation.reject(error(message,code)); }
+    pending.clear(); status(statusName,message);
   }
   function connect() {
     if (connected && popup && !popup.closed) return Promise.resolve();
-    if (connectPromise && popup && !popup.closed) { popup.focus?.(); return connectPromise; }
+    if (connectPromise && popup && !popup.closed) { try { popup.focus?.(); } catch {} return connectPromise; }
     if (popup) { const previous = popup; disconnect(); try { previous.close(); } catch {} popup = null; }
     nonce = randomToken();
     // This must remain synchronous with the user's click so mobile browsers allow it.
     popup = window.open(`${targetOrigin}/?bridge=1`, `health-sync-${nonce.slice(0,16)}`, 'popup=yes,width=520,height=680');
-    if (!popup) { status('error','Браузер заблокировал окно синхронизации.'); return Promise.reject(error('Разрешите открыть окно личного хранилища для синхронизации.','popup_blocked')); }
+    if (!popup) { status('error','Браузер не открыл окно синхронизации. Локальные записи сохранены.'); return Promise.reject(error('Окно личного хранилища не открылось. Локальные записи сохранены; проверьте, разрешены ли всплывающие окна.','popup_blocked')); }
     status('connecting','Откройте личное хранилище в появившемся окне.');
     connectPromise = new Promise((resolve,reject) => { readyResolve = resolve; readyReject = reject; });
     const init = () => { try { popup?.postMessage({ channel:CHANNEL, type:'init', nonce },targetOrigin); } catch { /* Navigation to sign-in can temporarily prevent messaging. */ } };
     init(); handshakeTimer = setInterval(init,700);
-    handshakeTimeout = setTimeout(() => disconnect('Вход в хранилище не завершён. Повторите подключение.'), 5*60*1000);
+    handshakeWarning = setTimeout(() => status('unconfirmed','Облако ещё не подтвердило соединение. Проверьте открытое окно: вход или доступ к сервису могли не завершиться. Локальные записи сохранены.'),12000);
+    handshakeTimeout = setTimeout(() => disconnect('Облако не подтвердило соединение. Если в отдельном окне показана блокировка доступа, синхронизация недоступна. Локальные записи сохранены; используйте зашифрованную резервную копию для переноса.','handshake_timeout','error'),60000);
     closedTimer = setInterval(() => { if (!popup || popup.closed) disconnect(); },1000);
     return connectPromise;
   }
@@ -54,10 +63,10 @@ export function createSyncClient({ origin, onStatus = () => {} }) {
     if (operation === 'write' && (envelope?.format !== 'health-vault-v1' || envelope.cipher?.name !== 'AES-GCM' || typeof envelope.cipher.data !== 'string' || !envelope.kdf)) throw error('Отправлять можно только зашифрованную копию.');
     const id = crypto.randomUUID();
     return new Promise((resolve,reject) => {
-      const timer = setTimeout(() => { pending.delete(id); reject(error('Синхронизация заняла слишком много времени. Локальная копия сохранена.','timeout')); },120000);
+      const timer = setTimeout(() => disconnect('Сервис не подтвердил синхронизацию вовремя. Локальная копия сохранена. Подключитесь заново или перенесите зашифрованную резервную копию.','timeout','error'),120000);
       pending.set(id,{ resolve,reject,timer });
       try { popup.postMessage({ channel:CHANNEL,type:'request',nonce,id,operation,scope,...(operation === 'write' ? { envelope,etag:etag ?? null } : {}) },targetOrigin); }
-      catch { clearTimeout(timer); pending.delete(id); reject(error('Не удалось связаться с личным хранилищем.','connection_failed')); }
+      catch { disconnect('Не удалось связаться с личным хранилищем. Локальная копия сохранена.','connection_failed','error'); }
     });
   }
   return {
