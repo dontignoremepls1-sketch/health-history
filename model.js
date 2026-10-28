@@ -1,7 +1,7 @@
 // All clinical content belongs in the encrypted vault, never in this module.
-export const COLLECTIONS = Object.freeze(['people', 'problems', 'labs', 'documents', 'timeline', 'actions', 'sources', 'medications', 'symptoms', 'visits']);
+export const COLLECTIONS = Object.freeze(['people', 'problems', 'labs', 'documents', 'timeline', 'actions', 'sources', 'medications', 'symptoms', 'visits', 'genetics']);
 export const LIFECYCLE_LABELS = Object.freeze({ unreviewed:'Актуальность не уточнена', active:'Активна', monitoring:'Наблюдаю', paused:'Отложена', closed:'Закрыта мной' });
-export const DOCUMENT_KIND_LABELS = Object.freeze({ analysis:'Анализ', consultation:'Консультация', examination:'Обследование', procedure:'Процедура', report:'Обзор', note:'Заметка', photo:'Фотография' });
+export const DOCUMENT_KIND_LABELS = Object.freeze({ analysis:'Анализ', consultation:'Консультация', examination:'Обследование', procedure:'Процедура', genetic_report:'Генетический отчёт', report:'Обзор', note:'Заметка', photo:'Фотография' });
 export const CLINICAL_KIND_LABELS = Object.freeze({ unspecified:'Не указано', symptom:'Жалоба', hypothesis:'Предположение', confirmed:'Подтверждённый диагноз', refuted:'Исключённый диагноз' });
 const forbidden = new Set(['__proto__', 'prototype', 'constructor']);
 const clone = (value) => structuredClone(value);

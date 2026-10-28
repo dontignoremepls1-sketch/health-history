@@ -1,9 +1,9 @@
-import { decryptEnvelope, encryptJson, decryptJson, decryptAsset, encryptAsset, toBase64, fromBase64, limits } from './crypto.js?v=2.2';
-import * as model from './model.js?v=2.2';
-import * as views from './views.js?v=2.2';
+import { decryptEnvelope, encryptJson, decryptJson, decryptAsset, encryptAsset, toBase64, fromBase64, limits } from './crypto.js?v=2.3';
+import * as model from './model.js?v=2.3';
+import * as views from './views.js?v=2.3';
 import { createSyncClient, syncScope } from './sync.js?v=2.1';
 import { SYNC_ORIGIN } from './config.js';
-import { installRecordController, prepareAttachment } from './records-controller.js?v=2.2';
+import { installRecordController, prepareAttachment } from './records-controller.js?v=2.3';
 import { extractDocument, parseLabText } from './import.js';
 
 const $ = (id) => document.getElementById(id);
@@ -175,7 +175,7 @@ function lock(message = '') {
   revokeDocuments();
   for(const url of state.downloadUrls)URL.revokeObjectURL(url);state.downloadUrls.clear();
   clearTimeout(state.syncTimer); state.sync?.close();
-  Object.assign(state, { key:null, kdf:null, base:null, vault:null, overlay:emptyOverlay(), assets:{}, personId:null, scope:null, legacyScopes:[], busy:false, editing:null, importDraft:null, visitDraft:null, sync:null, syncEtag:undefined, conflict:null, importInputFile:null,backupSession:false });
+  Object.assign(state, { key:null, kdf:null, base:null, vault:null, overlay:emptyOverlay(), assets:{}, personId:null, scope:null, legacyScopes:[], busy:false, editing:null, importDraft:null, visitDraft:null, sync:null, syncEtag:undefined, conflict:null, importInputFile:null,backupSession:false,filters:{} });
   state.database?.close(); state.database = null;
   $('main').replaceChildren(); $('profile-select').replaceChildren(); $('search-results').replaceChildren(); $('search-results').hidden = true;
   $('record-fields').replaceChildren(); $('record-title').textContent = 'Добавить запись'; $('document-title').textContent = 'Документ';
@@ -317,6 +317,8 @@ function render() {
   else if (page === 'problem') html = problemControls(id) + problemDetail(id) + problemNotes(id) + relatedCare(id);
   else if (page === 'labs') html = views.renderLabOverview(viewContext());
   else if (page === 'lab') html = views.renderLabHistory(viewContext(),id);
+  else if (page === 'genetics') html = views.renderGenetics(viewContext());
+  else if (page === 'genetic') html = views.renderGeneticDetail(viewContext(),id);
   else if (page === 'care') html = views.renderCare(viewContext());
   else if (page === 'visit') html = views.renderVisit(viewContext());
   else if (page === 'visit-report') { const report=records('visits').find(v=>v.id===id)||state.visitDraft; html=report?views.renderVisitReport(viewContext(),report)+`<button class="button button-secondary v2-no-print" type="button" data-download-visit="${esc(report.id)}">Скачать сводку HTML</button>`:empty('Сводка не найдена.'); }
@@ -325,7 +327,7 @@ function render() {
   else if (page === 'timeline') html = `${heading('04 / ХРОНОЛОГИЯ','История событий','Симптомы, консультации, анализы и обновления в одной ленте.',button('timeline','Добавить событие'))}<section class="panel">${timeline(records('timeline'))}</section>`;
   else if (page === 'actions') html = `${heading('05 / ДАЛЬНЕЙШИЕ ШАГИ','План действий','Выполненные действия сохраняются в истории. Статус проблемы меняется отдельно.',button('action','Добавить шаг'))}<section class="panel">${views.renderTasks(viewContext(),records('actions'))}</section>`;
   else if (page === 'profiles') html = profilesPage();
-  else if (page === 'sources') html = `${heading('06 / ДОКАЗАТЕЛЬНАЯ БАЗА','Источники','Исследования, обзоры и профессиональные рекомендации, использованные в разборах.')}${sourceList(state.vault.sources.filter((s) => records('problems').some((p) => (p.sourceIds || []).includes(s.id))))}`;
+  else if (page === 'sources') html = `${heading('06 / ДОКАЗАТЕЛЬНАЯ БАЗА','Источники','Исследования, обзоры и профессиональные рекомендации, использованные в разборах.')}${sourceList(state.vault.sources.filter((s) => records('problems').some((p) => (p.sourceIds || []).includes(s.id)) || records('genetics').some(g=>(g.assessmentSourceIds||[]).includes(s.id))))}`;
   else if (page === 'settings') html = settingsPage() + syncPanel();
   else html = `${heading('СТРАНИЦА НЕ НАЙДЕНА','Такого раздела нет','Выберите раздел в меню.')}${routeLink('home','На главную →','button button-primary')}`;
   if (state.legacyScopes.length) html = (page === 'settings' ? '' : `<div class="local-notice">Найдены дополнения с прежним паролем. ${routeLink('settings','Перенести записи →')}</div>`) + html + (page === 'settings' ? migrationPanel() : '');
@@ -335,9 +337,9 @@ function render() {
   if($('document-kind'))$('document-kind').value=state.filters.documentKind||'';
   if(page==='documents') $('main').querySelector('.section-head')?.insertAdjacentHTML('beforeend','<button class="button button-secondary" type="button" data-import>Извлечь из файла</button>');
   for (const card of $('main').querySelectorAll('.document-card')) { const id=card.querySelector('[data-document]')?.dataset.document; if(id)card.insertAdjacentHTML('beforeend',`<div class="record-tools"><button class="button button-secondary button-small" data-edit="documents:${esc(id)}" type="button">Изменить</button>${routeLink(`history/documents/${encodeURIComponent(id)}`,'История изменений','button button-secondary button-small')}</div>`); }
-  for(const card of $('main').querySelectorAll('.document-card')){const id=card.querySelector('[data-document]')?.dataset.document,doc=id&&getDocument(id);if(doc)card.insertAdjacentHTML('beforeend',`<button class="button button-secondary button-small" type="button" data-import-document="${esc(id)}">Извлечь результаты из документа</button>`);}
+  for(const card of $('main').querySelectorAll('.document-card')){const id=card.querySelector('[data-document]')?.dataset.document,doc=id&&getDocument(id);if(doc&&doc.mime!=='application/gzip'&&doc.kind!=='genetic_report')card.insertAdjacentHTML('beforeend',`<button class="button button-secondary button-small" type="button" data-import-document="${esc(id)}">Извлечь результаты из документа</button>`);}
   for (const card of $('main').querySelectorAll('.profile-card')) { const id=card.querySelector('[data-profile]')?.dataset.profile; if(id)card.insertAdjacentHTML('beforeend',`<button class="button button-secondary button-small" type="button" data-edit="people:${esc(id)}">Изменить профиль</button>`); }
-  for (const link of $('header-nav').querySelectorAll('a')) { const active = link.hash === `#/${page === 'problem' ? 'problems' : page === 'lab' ? 'labs' : page}`; if (active) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current'); }
+  for (const link of $('header-nav').querySelectorAll('a')) { const active = link.hash === `#/${page === 'problem' ? 'problems' : page === 'lab' ? 'labs' : page === 'genetic' ? 'genetics' : page}`; if (active) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current'); }
   $('header-nav').classList.remove('is-open'); $('menu-toggle').ariaExpanded = 'false'; hideSearch();
 }
 
@@ -346,6 +348,7 @@ $('global-search').addEventListener('input', () => {
   const query = $('global-search').value.trim().toLocaleLowerCase('ru');
   if (!query) { hideSearch(); return; }
   const candidates = [...records('problems').map((p) => ({ title:p.title, copy:p.summary, path:`problem/${encodeURIComponent(p.id)}`, type:'Разбор' })), ...records('labs').map((l) => ({ title:l.name, copy:`${l.value} ${l.unit} · ${l.interpretation}`, path:`lab/${encodeURIComponent(l.id)}`, type:'Анализ' })), ...records('documents').map((d) => ({ title:d.title, copy:d.description, documentId:d.id, type:'Документ' })),...records('medications').map(m=>({title:m.name,copy:[m.reason,m.notes,m.dose].join(' '),path:'care',type:'Препарат'})),...records('symptoms').map(s=>({title:s.title,copy:s.description,path:'care',type:'Наблюдение'})),...records('visits').map(v=>({title:v.title,copy:[v.complaints,v.questions].join(' '),path:`visit-report/${encodeURIComponent(v.id)}`,type:'Для приёма'}))];
+  candidates.push(...records('genetics').map(g=>({title:g.title,copy:[g.provider,g.rawCardText,g.assessment,...(g.variants||[]).map(v=>[v.gene,v.rsid,v.rsId].filter(Boolean).join(' '))].filter(Boolean).join(' '),path:`genetic/${encodeURIComponent(g.id)}`,type:'Генетика'})));
   const results = candidates.filter((r) => `${r.title} ${r.copy}`.toLocaleLowerCase('ru').includes(query)).slice(0,10);
   $('search-results').innerHTML = results.length ? results.map((r) => r.documentId ? `<button type="button" class="search-result" data-document="${esc(r.documentId)}"><span class="eyebrow">${r.type}</span><strong>${esc(r.title)}</strong></button>` : routeLink(r.path, `<span class="eyebrow">${r.type}</span><strong>${esc(r.title)}</strong>`, 'search-result')).join('') : '<p class="search-result">Ничего не найдено.</p>';
   $('search-results').hidden = false; $('global-search').ariaExpanded = 'true';
@@ -382,9 +385,15 @@ document.addEventListener('click', async (event) => {
   if (target.dataset.profile) { state.personId = target.dataset.profile;state.filters={};state.visitDraft=null;populateProfiles(); location.hash = '#/home'; render(); }
   if (target.id === 'export-backup') await exportBackup(target);
 });
+document.addEventListener('input',event=>{
+  if(!state.key||event.target.id!=='genetic-query')return;
+  const start=event.target.selectionStart,end=event.target.selectionEnd;
+  state.filters.geneticQuery=event.target.value;render();
+  const field=$('genetic-query');if(field){field.focus();if(start!==null&&end!==null)field.setSelectionRange(start,end);}
+});
 document.addEventListener('change', (event) => {
   if (!state.key) return;
-  const filterKeys={'problem-lifecycle':'problemLifecycle','lab-view':'labView','lab-group-v2':'labGroup','lab-problem':'labProblem','lab-status-v2':'labStatus','lab-favorites':'labFavorites'};
+  const filterKeys={'problem-lifecycle':'problemLifecycle','lab-view':'labView','lab-group-v2':'labGroup','lab-problem':'labProblem','lab-status-v2':'labStatus','lab-favorites':'labFavorites','genetic-level':'geneticLevel','genetic-category':'geneticCategory'};
   if(filterKeys[event.target.id]){state.filters[filterKeys[event.target.id]]=event.target.type==='checkbox'?event.target.checked:event.target.value;render();}
   if (['lab-group','lab-status'].includes(event.target.id)) { const labs = records('labs').filter((l) => (!$('lab-group').value || l.group === $('lab-group').value) && (!$('lab-status').value || l.status === $('lab-status').value)); $('lab-results').innerHTML = labTable(labs); $('lab-count').textContent = `Показателей: ${labs.length}`; }
   if (event.target.id === 'document-kind') { state.filters.documentKind=event.target.value;render(); }
@@ -417,6 +426,7 @@ async function openDocument(id) {
     }
     if (doc.mime === 'application/pdf') { const frame = document.createElement('iframe'); frame.src = url; frame.title = doc.title; frame.className = 'pdf-frame'; $('document-viewer').append(frame); }
     else if(doc.mime.startsWith('image/')) { const img=document.createElement('img');img.src=url;img.alt=doc.title;img.className='journal-photo';$('document-viewer').append(img); }
+    else if(doc.mime==='application/gzip') { const note=document.createElement('p');note.className='section-note';note.textContent='Это сжатый архив исходных данных. Скачайте файл и распакуйте его на своём устройстве. Генетические данные внутри архива не преобразуются автоматически в диагнозы или обычные анализы.';$('document-viewer').append(note); }
     else { const pre = document.createElement('pre'); pre.className = 'document-text'; pre.textContent = new TextDecoder(doc.encoding||'utf-8').decode(plain); $('document-viewer').append(pre); }
   } catch (error) { if (generation === state.generation && request === state.documentRequest) $('document-viewer').textContent = error.name === 'OperationError' ? 'Не удалось проверить целостность документа.' : error.message; }
 }

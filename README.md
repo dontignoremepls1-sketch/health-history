@@ -6,12 +6,10 @@ Website: https://dontignoremepls1-sketch.github.io/health-history/
 
 The public repository contains only neutral application resources and encrypted records/documents. The password, private source and original clinical files are not included.
 
-The app supports problem statuses and audit history, latest results and trends, document review, medication and symptom journals, consultation summaries and encrypted backups. PDF text extraction and OCR run locally using the self-hosted dependencies with their included licenses.
+The app supports separate profiles, problem statuses and audit history, latest results and trends, document review, medication and symptom journals, consultation summaries and encrypted backups. PDF extraction and OCR run locally with self-hosted dependencies and their licenses.
 
-Imported concerns can remain explicitly unreviewed until the user decides whether they are current. Document filters separate laboratory reports, consultations, examinations and procedures. Adding a profile preserves existing record identifiers and key parameters.
+Genetic results have a separate searchable section. Provider statements, raw variant reviews, clinical interpretation and collection coverage retain distinct provenance. Genetic risk labels do not create confirmed diagnoses. Original compressed exports are available as decrypted downloads after unlocking.
 
-Records save encrypted in the browser. Optional owner-private cloud synchronization uses a separate authenticated window and encrypted-only transport. Backup files open in an isolated session and never silently replace the main database. Downloaded consultation summaries and original documents are ordinary decrypted files on the user's device.
+Records save encrypted in the browser. Optional owner-private cloud synchronization uses a separate authenticated window and encrypted-only transport. Cloud access is currently affected by a Cloudflare block; the app explains this and provides encrypted-file transfer. Backups open in an isolated session and never silently replace the main database. Downloaded originals and consultation summaries are ordinary decrypted files on the user's device. Real phone memory limits remain device dependent.
 
-Cloud access is currently affected by a Cloudflare block; the app explains this and provides encrypted-file transfer. The backup input limit accounts for base64 expansion, allowing supported large exports to reopen. Real phone memory limits remain device dependent.
-
-Encryption: AES-256-GCM, PBKDF2-SHA-256 with 600,000 iterations and fresh random IVs. No tracking or analytics.
+Encryption: AES-256-GCM and PBKDF2-SHA-256 with 600,000 iterations. New or changed documents get fresh random IVs. A build may reuse existing ciphertext only after authenticating it with the current key and verifying that its decrypted bytes exactly match the current source. No tracking or analytics.

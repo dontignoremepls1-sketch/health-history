@@ -1,14 +1,15 @@
-import * as model from './model.js?v=2.2';
-import { recordForm, readRecordForm, TYPES, TYPE_FOR } from './forms.js?v=2.2';
-import { encryptAsset, toBase64 } from './crypto.js?v=2.2';
+import * as model from './model.js?v=2.3';
+import { recordForm, readRecordForm, TYPES, TYPE_FOR } from './forms.js?v=2.3';
+import { encryptAsset, toBase64 } from './crypto.js?v=2.3';
 
 export async function prepareAttachment(file,{key,personId,documents=[],id=crypto.randomUUID(),metadata={},maxMB=20}) {
   if(!file||typeof file.arrayBuffer!=='function'||!file.size||file.size>maxMB*1024*1024) throw Error(`Выберите непустой файл до ${maxMB} МБ.`);
   const extension=file.name.split('.').pop().toLowerCase();
-  const types={pdf:'application/pdf',md:'text/markdown',txt:'text/plain',csv:'text/plain',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp'};
-  const mime=types[extension]; if(!mime)throw Error('Поддерживаются PDF, текст, CSV, PNG, JPEG и WebP.');
+  const types={pdf:'application/pdf',md:'text/markdown',txt:'text/plain',csv:'text/plain',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp',gz:'application/gzip'};
+  const mime=types[extension]; if(!mime)throw Error('Поддерживаются PDF, текст, CSV, PNG, JPEG, WebP и архивы gzip.');
   const bytes=await file.arrayBuffer(), header=new Uint8Array(bytes.slice(0,12));
   if(extension==='pdf'&&new TextDecoder().decode(header.slice(0,5))!=='%PDF-')throw Error('Файл не похож на PDF.');
+  if(extension==='gz'&&!(file.size>=18&&header[0]===31&&header[1]===139&&header[2]===8&&(header[3]&224)===0))throw Error('Файл не похож на архив gzip.');
   if(mime==='image/png'&&!(header[0]===137&&header[1]===80&&header[2]===78&&header[3]===71))throw Error('Некорректный PNG.');
   if(mime==='image/jpeg'&&!(header[0]===255&&header[1]===216))throw Error('Некорректный JPEG.');
   if(mime==='image/webp'&&!(new TextDecoder().decode(header.slice(0,4))==='RIFF'&&new TextDecoder().decode(header.slice(8,12))==='WEBP'))throw Error('Некорректный WebP.');
