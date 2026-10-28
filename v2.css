@@ -147,6 +147,17 @@
   .visit-report { padding:20px 17px; margin-top:20px; }
   .visit-report p, .visit-report li { font-size:14px; }
 }
+.v2-source-text { white-space:pre-wrap; overflow-wrap:anywhere; max-width:100%; }
+.v2-provider-report { margin-top:24px; overflow-wrap:anywhere; }
+.v2-provider-report dl { display:grid; grid-template-columns:minmax(100px,.35fr) minmax(0,1fr); gap:8px 16px; margin:12px 0; }
+.v2-provider-report dt { color:var(--dim); font-weight:700; }
+.v2-provider-report dd { margin:0; min-width:0; }
+.v2-provider-report dd p { margin:0; }
+@media (max-width:600px) {
+  .v2-provider-report dl { grid-template-columns:minmax(0,1fr); gap:4px; }
+  .v2-provider-report dd { margin-bottom:12px; }
+}
+
 @media print {
   body:has(.visit-report) { background:white !important; color:black !important; }
   body:has(.visit-report) .site-header, body:has(.visit-report) .site-footer, body:has(.visit-report) .v2-no-print, body:has(.visit-report) .toast { display:none !important; }

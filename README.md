@@ -8,7 +8,7 @@ The public repository contains only neutral application resources and encrypted 
 
 The app supports separate profiles, problem statuses and audit history, latest results and trends, document review, medication and symptom journals, consultation summaries and encrypted backups. PDF extraction and OCR run locally with self-hosted dependencies and their licenses.
 
-Genetic results have a separate searchable section. Provider statements, raw variant reviews, clinical interpretation and collection coverage retain distinct provenance. Genetic risk labels do not create confirmed diagnoses. Original compressed exports are available as decrypted downloads after unlocking.
+Genetic results have a separate searchable section. Provider statements, raw variant reviews, clinical interpretation and collection coverage retain distinct provenance. Complete and partial captures are counted separately. Saved provider text opens from its record through a bounded on-demand gzip reader; raw DNA exports remain download-only. Genetic risk labels do not create confirmed diagnoses. Original compressed exports are available as decrypted downloads after unlocking.
 
 Records save encrypted in the browser. Optional owner-private cloud synchronization uses a separate authenticated window and encrypted-only transport. Cloud access is currently affected by a Cloudflare block; the app explains this and provides encrypted-file transfer. Backups open in an isolated session and never silently replace the main database. Downloaded originals and consultation summaries are ordinary decrypted files on the user's device. Real phone memory limits remain device dependent.
 

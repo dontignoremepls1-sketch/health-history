@@ -1,10 +1,11 @@
-import { decryptEnvelope, encryptJson, decryptJson, decryptAsset, encryptAsset, toBase64, fromBase64, limits } from './crypto.js?v=2.3';
-import * as model from './model.js?v=2.3';
-import * as views from './views.js?v=2.3';
+import { decryptEnvelope, encryptJson, decryptJson, decryptAsset, encryptAsset, toBase64, fromBase64, limits } from './crypto.js?v=2.4';
+import * as model from './model.js?v=2.4';
+import * as views from './views.js?v=2.4';
 import { createSyncClient, syncScope } from './sync.js?v=2.1';
 import { SYNC_ORIGIN } from './config.js';
-import { installRecordController, prepareAttachment } from './records-controller.js?v=2.3';
+import { installRecordController, prepareAttachment } from './records-controller.js?v=2.4';
 import { extractDocument, parseLabText } from './import.js';
+import { readGeneticReport, GENETIC_BUNDLE_FORMAT } from './genetic-bundle.js?v=2.4';
 
 const $ = (id) => document.getElementById(id);
 const esc = (v = '') => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -163,6 +164,7 @@ function armLock() {
   clearTimeout(state.timer); state.timer = setTimeout(() => lock('База заблокирована после 15 минут бездействия.'), 15 * 60 * 1000);
 }
 function revokeDocuments() {
+  state.documentAbort?.abort(); state.documentAbort = null;
   state.documentRequest++;
   for (const url of state.urls) URL.revokeObjectURL(url);
   state.urls.clear(); $('document-viewer').replaceChildren();
@@ -242,7 +244,7 @@ function populateProfiles() {
   $('profile-select').innerHTML = state.vault.people.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
   $('profile-select').value = state.personId;
 }
-$('profile-select').addEventListener('change', () => { state.personId = $('profile-select').value; state.filters={};state.visitDraft=null;$('global-search').value = ''; hideSearch(); location.hash = '#/home'; render(); });
+$('profile-select').addEventListener('change', () => { if($('document-dialog').open)$('document-dialog').close();revokeDocuments();state.personId = $('profile-select').value; state.filters={};state.visitDraft=null;$('global-search').value = ''; hideSearch(); location.hash = '#/home'; render(); });
 $('menu-toggle').addEventListener('click', () => { const open = $('menu-toggle').ariaExpanded !== 'true'; $('header-nav').classList.toggle('is-open', open); $('menu-toggle').ariaExpanded = String(open); });
 window.addEventListener('hashchange', () => { if (state.key) { render(); $('main').focus({ preventScroll:true }); window.scrollTo({ top:0, behavior:'instant' }); } });
 
@@ -382,7 +384,8 @@ document.addEventListener('click', async (event) => {
   if(target.hasAttribute('data-return-published')){state.imported=null;$('backup-selection').textContent='';lock();}
   if (target.dataset.scroll) { event.preventDefault(); $(target.dataset.scroll)?.scrollIntoView({ behavior:'smooth', block:'start' }); }
   if (target.dataset.document) await openDocument(target.dataset.document);
-  if (target.dataset.profile) { state.personId = target.dataset.profile;state.filters={};state.visitDraft=null;populateProfiles(); location.hash = '#/home'; render(); }
+  if (target.dataset.geneticReport) await openGeneticReport(target.dataset.geneticReport);
+  if (target.dataset.profile) { if($('document-dialog').open)$('document-dialog').close();revokeDocuments();state.personId = target.dataset.profile;state.filters={};state.visitDraft=null;populateProfiles(); location.hash = '#/home'; render(); }
   if (target.id === 'export-backup') await exportBackup(target);
 });
 document.addEventListener('input',event=>{
@@ -399,11 +402,11 @@ document.addEventListener('change', (event) => {
   if (event.target.id === 'document-kind') { state.filters.documentKind=event.target.value;render(); }
 });
 
-async function encryptedDocument(doc) {
+async function encryptedDocument(doc, signal) {
   const local = state.overlay.assets[doc.id] || state.assets[doc.id];
   if (local) return fromBase64(local).buffer;
   if (typeof doc.asset !== 'string' || !/^assets\/[a-zA-Z0-9_-]+\.bin$/.test(doc.asset)) throw new Error('Нет зашифрованного файла документа.');
-  const response = await fetch(doc.asset); if (!response.ok) throw new Error('Не удалось загрузить документ. Проверьте соединение.');
+  const response = await fetch(doc.asset,{signal,cache:'no-store'}); if (!response.ok) throw new Error('Не удалось загрузить документ. Проверьте соединение.');
   return response.arrayBuffer();
 }
 async function openDocument(id) {
@@ -429,6 +432,40 @@ async function openDocument(id) {
     else if(doc.mime==='application/gzip') { const note=document.createElement('p');note.className='section-note';note.textContent='Это сжатый архив исходных данных. Скачайте файл и распакуйте его на своём устройстве. Генетические данные внутри архива не преобразуются автоматически в диагнозы или обычные анализы.';$('document-viewer').append(note); }
     else { const pre = document.createElement('pre'); pre.className = 'document-text'; pre.textContent = new TextDecoder(doc.encoding||'utf-8').decode(plain); $('document-viewer').append(pre); }
   } catch (error) { if (generation === state.generation && request === state.documentRequest) $('document-viewer').textContent = error.name === 'OperationError' ? 'Не удалось проверить целостность документа.' : error.message; }
+}
+async function openGeneticReport(id) {
+  const record = records('genetics').find(item=>item.id===id), source = record?.reportSource;
+  const doc = source && getDocument(source.documentId);
+  if(!record || source?.format!==GENETIC_BUNDLE_FORMAT || !doc || doc.kind!=='genetic_report' || doc.mime!=='application/gzip' || doc.bundleFormat!==GENETIC_BUNDLE_FORMAT || !(record.sourceDocumentIds||[]).includes(doc.id)) {
+    toast('Сохранённый текст отчёта недоступен для текущего профиля.'); return;
+  }
+  hideSearch(); revokeDocuments();
+  const controller = new AbortController(); state.documentAbort=controller;
+  const generation=state.generation, request=state.documentRequest, personId=state.personId, key=state.key;
+  const current=()=>generation===state.generation && request===state.documentRequest && personId===state.personId && !!state.key && $('document-dialog').open && !controller.signal.aborted;
+  $('document-title').textContent=record.title;
+  $('document-viewer').textContent='Загрузка и расшифровка сохранённого отчёта…';
+  if(!$('document-dialog').open)$('document-dialog').showModal();
+  let progress;
+  try {
+    const bytes=await encryptedDocument(doc,controller.signal); if(!current())return;
+    const plain=await decryptAsset(bytes,key); if(!current())return;
+    $('document-viewer').replaceChildren();
+    const url=URL.createObjectURL(new Blob([plain],{type:doc.mime}));state.urls.add(url);
+    const hint=document.createElement('p');hint.className='section-note';hint.textContent='Архив содержит сохранённые тексты поставщика. После скачивания на устройстве останется расшифрованный файл.';
+    const download=document.createElement('a');download.className='button button-secondary button-small';download.href=url;download.download=doc.fileName||'genetic-reports.json.gz';download.textContent='Скачать архив отчётов ↓';
+    progress=document.createElement('p');progress.className='section-note';progress.textContent='Открываю выбранный отчёт…';
+    $('document-viewer').append(hint,download,progress);
+    const report=await readGeneticReport(plain,{id:source.entryId,personId,personIds:[personId],signal:controller.signal});
+    if(!current())return;
+    const article=document.createElement('article');article.className='v2-provider-report';
+    article.innerHTML=views.renderGeneticProviderReport(viewContext(),{...report,recordId:record.id,documentId:doc.id,entryId:report.id});
+    progress.replaceWith(article);
+  } catch(error) {
+    if(!current() || error.name==='AbortError')return;
+    const message=error.name==='OperationError'?'Не удалось проверить целостность отчёта.':error.message;
+    if(progress)progress.textContent=message;else $('document-viewer').textContent=message;
+  }
 }
 $('document-dialog').addEventListener('close', revokeDocuments);
 async function exportBackup(target) {

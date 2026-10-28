@@ -1,4 +1,4 @@
-import {referenceBounds,parseNumeric,LIFECYCLE_LABELS,DOCUMENT_KIND_LABELS} from './model.js?v=2.3';
+import {referenceBounds,parseNumeric,LIFECYCLE_LABELS,DOCUMENT_KIND_LABELS} from './model.js?v=2.4';
 const e = (value='') => String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export const TYPES = {person:'people',problem:'problems',lab:'labs',genetic:'genetics',document:'documents',timeline:'timeline',action:'actions',medication:'medications',symptom:'symptoms',visit:'visits'};
 export const TYPE_FOR = Object.fromEntries(Object.entries(TYPES).map(([type,collection])=>[collection,type]));
