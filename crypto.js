@@ -1,6 +1,8 @@
 const FORMAT = 'health-vault-v1';
 const ITERATIONS = 600000;
 const MAX_JSON_BYTES = 128 * 1024 * 1024;
+// The encrypted bytes expand to base64 inside the downloadable JSON envelope.
+const MAX_ENVELOPE_FILE_BYTES = Math.ceil(MAX_JSON_BYTES / 3) * 4 + 8192;
 const MAX_ASSET_BYTES = 25 * 1024 * 1024;
 const utf8 = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -107,4 +109,4 @@ export async function decryptAsset(input, key) {
   } catch { throw new Error('Документ повреждён или зашифрован другим паролем.'); }
 }
 
-export const limits = Object.freeze({ jsonBytes: MAX_JSON_BYTES, assetBytes: MAX_ASSET_BYTES, iterations: ITERATIONS });
+export const limits = Object.freeze({ jsonBytes: MAX_JSON_BYTES, fileBytes: MAX_ENVELOPE_FILE_BYTES, assetBytes: MAX_ASSET_BYTES, iterations: ITERATIONS });

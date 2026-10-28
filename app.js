@@ -1,9 +1,9 @@
-import { decryptEnvelope, encryptJson, decryptJson, decryptAsset, encryptAsset, toBase64, fromBase64 } from './crypto.js';
-import * as model from './model.js';
-import * as views from './views.js?v=2.1';
+import { decryptEnvelope, encryptJson, decryptJson, decryptAsset, encryptAsset, toBase64, fromBase64, limits } from './crypto.js?v=2.2';
+import * as model from './model.js?v=2.2';
+import * as views from './views.js?v=2.2';
 import { createSyncClient, syncScope } from './sync.js?v=2.1';
 import { SYNC_ORIGIN } from './config.js';
-import { installRecordController, prepareAttachment } from './records-controller.js';
+import { installRecordController, prepareAttachment } from './records-controller.js?v=2.2';
 import { extractDocument, parseLabText } from './import.js';
 
 const $ = (id) => document.getElementById(id);
@@ -26,7 +26,7 @@ const getProblem = (id) => state.vault.problems.find((p) => p.id === id && p.per
 const getDocument = (id) => state.vault.documents.find((d) => d.id === id && d.personId === state.personId);
 const localBadge = (record) => record.local ? '<span class="badge badge-calculated">В этом браузере</span>' : '';
 const statusLabel = { normal:'В референсе', high:'Выше референса', low:'Ниже референса', calculated:'Расчёт', unreviewed:'Без оценки' };
-const kindLabel = { analysis:'Анализ', consultation:'Консультация', report:'Обзор', note:'Заметка' };
+const kindLabel = model.DOCUMENT_KIND_LABELS;
 const eventLabel = { ...kindLabel, history:'Анамнез', review:'Обновление обзора', planned:'Запланировано', symptom:'Симптомы', lab:'Анализ', update:'Обновление' };
 const routeLink = (path, label, cls = '') => `<a class="${esc(cls)}" href="#/${esc(path)}">${label}</a>`;
 const safeUrl = (value) => { try { const u = new URL(value); return u.protocol === 'https:' ? u.href : null; } catch { return null; } };
@@ -228,7 +228,7 @@ $('import-backup').addEventListener('click', () => $('import-file').click());
 $('import-file').addEventListener('change', async () => {
   const file = $('import-file').files[0]; if (!file) return;
   try {
-    if (file.size > 150 * 1024 * 1024) throw new Error('Файл больше 150 МБ.');
+    if (file.size > limits.fileBytes) throw new Error('Файл превышает допустимый размер зашифрованной резервной копии.');
     const envelope = JSON.parse(await file.text());
     if (envelope.format !== 'health-vault-v1') throw new Error('Выберите зашифрованную резервную копию этой базы.');
     state.imported = envelope; $('backup-selection').textContent = 'Выбрана резервная копия. Введите её пароль. Чтобы открыть опубликованную базу, обновите страницу.';

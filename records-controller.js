@@ -1,6 +1,6 @@
-import * as model from './model.js';
-import { recordForm, readRecordForm, TYPES, TYPE_FOR } from './forms.js';
-import { encryptAsset, toBase64 } from './crypto.js';
+import * as model from './model.js?v=2.2';
+import { recordForm, readRecordForm, TYPES, TYPE_FOR } from './forms.js?v=2.2';
+import { encryptAsset, toBase64 } from './crypto.js?v=2.2';
 
 export async function prepareAttachment(file,{key,personId,documents=[],id=crypto.randomUUID(),metadata={},maxMB=20}) {
   if(!file||typeof file.arrayBuffer!=='function'||!file.size||file.size>maxMB*1024*1024) throw Error(`Выберите непустой файл до ${maxMB} МБ.`);

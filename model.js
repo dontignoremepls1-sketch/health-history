@@ -1,6 +1,7 @@
 // All clinical content belongs in the encrypted vault, never in this module.
 export const COLLECTIONS = Object.freeze(['people', 'problems', 'labs', 'documents', 'timeline', 'actions', 'sources', 'medications', 'symptoms', 'visits']);
-export const LIFECYCLE_LABELS = Object.freeze({ active:'Активна', monitoring:'Наблюдаю', paused:'Отложена', closed:'Закрыта мной' });
+export const LIFECYCLE_LABELS = Object.freeze({ unreviewed:'Актуальность не уточнена', active:'Активна', monitoring:'Наблюдаю', paused:'Отложена', closed:'Закрыта мной' });
+export const DOCUMENT_KIND_LABELS = Object.freeze({ analysis:'Анализ', consultation:'Консультация', examination:'Обследование', procedure:'Процедура', report:'Обзор', note:'Заметка', photo:'Фотография' });
 export const CLINICAL_KIND_LABELS = Object.freeze({ unspecified:'Не указано', symptom:'Жалоба', hypothesis:'Предположение', confirmed:'Подтверждённый диагноз', refuted:'Исключённый диагноз' });
 const forbidden = new Set(['__proto__', 'prototype', 'constructor']);
 const clone = (value) => structuredClone(value);
@@ -33,7 +34,8 @@ function records(value, name) {
   });
 }
 function normalizeProblem(record) {
-  return { ...record, lifecycle:has(LIFECYCLE_LABELS,record.lifecycle) ? record.lifecycle : has(LIFECYCLE_LABELS,record.status) ? record.status : 'active', clinicalKind:has(CLINICAL_KIND_LABELS,record.clinicalKind) ? record.clinicalKind : 'unspecified' };
+  const legacyLifecycle = record.status !== 'unreviewed' && has(LIFECYCLE_LABELS,record.status) ? record.status : 'active';
+  return { ...record, lifecycle:has(LIFECYCLE_LABELS,record.lifecycle) ? record.lifecycle : legacyLifecycle, clinicalKind:has(CLINICAL_KIND_LABELS,record.clinicalKind) ? record.clinicalKind : 'unspecified' };
 }
 export function normalizeVault(input = {}) {
   assertJson(input);
