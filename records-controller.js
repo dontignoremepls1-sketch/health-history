@@ -1,6 +1,6 @@
-import * as model from './model.js?v=2.4';
-import { recordForm, readRecordForm, TYPES, TYPE_FOR } from './forms.js?v=2.4';
-import { encryptAsset, toBase64 } from './crypto.js?v=2.4';
+import * as model from './model.js?v=2.5';
+import { recordForm, readRecordForm, TYPES, TYPE_FOR } from './forms.js?v=2.5';
+import { encryptAsset, toBase64 } from './crypto.js?v=2.5';
 
 export async function prepareAttachment(file,{key,personId,documents=[],id=crypto.randomUUID(),metadata={},maxMB=20}) {
   if(!file||typeof file.arrayBuffer!=='function'||!file.size||file.size>maxMB*1024*1024) throw Error(`Выберите непустой файл до ${maxMB} МБ.`);
@@ -20,12 +20,13 @@ export async function prepareAttachment(file,{key,personId,documents=[],id=crypt
 
 export function installRecordController(api) {
   const {state,$,records,toast,render,populateProfiles,persistOverlay}=api;
-  function showForm(type,id=null) {
+  function showForm(type,id=null,{problemId=null}={}) {
     const collection=TYPES[type]; if(!collection)return;
     const record=id?state.vault[collection].find(r=>r.id===id&&(collection==='people'||r.personId===state.personId)):null;
     if(id&&!record){toast('Запись не найдена в выбранном профиле.');return;}
     state.formRequest=(state.formRequest||0)+1;state.formType=type;state.editing=record?{collection,id,record}:null;
-    const form=recordForm(type,{record:record||{},problems:records('problems'),documents:records('documents'),editing:!!record});
+    const context=problemId&&records('problems').some(p=>p.id===problemId)?{problemId,problemIds:[problemId]}:{};
+    const form=recordForm(type,{record:record||context,problems:records('problems'),documents:records('documents'),editing:!!record});
     $('record-title').textContent=form.title;$('record-fields').innerHTML=form.fields;$('record-error').textContent='';$('record-dialog').showModal();
   }
   $('record-form').addEventListener('submit',async event=>{
@@ -47,10 +48,11 @@ export function installRecordController(api) {
       }
       if(type==='lab'&&!editing){const duplicates=model.identifyDuplicates(records('labs'),parsed.record);if(duplicates.length)throw Error('Такой результат уже есть в профиле. Проверьте дату, показатель и исходный бланк.');}
       candidate=editing?model.editOverlay(candidate,state.vault,parsed.collection,editing.id,parsed.fields,parsed.reason):model.addRecord(candidate,parsed.collection,parsed.record);
-      if(!editing&&type==='document')candidate=model.addRecord(candidate,'timeline',{id:crypto.randomUUID(),personId:state.personId,date:parsed.record.date,title:parsed.record.title,description:'Добавлен документ.',type:parsed.record.kind,documentId:parsed.record.id,local:true});
+      if(!editing&&type==='document')candidate=model.addRecord(candidate,'timeline',{id:crypto.randomUUID(),personId:state.personId,date:new Date(now).toLocaleDateString('sv-SE'),title:parsed.record.title,description:'Добавлен документ.',type:parsed.record.kind,documentId:parsed.record.id,local:true});
       await persistOverlay(candidate);if(generation!==state.generation)return;
       if(type==='person'){if(!editing){state.personId=parsed.record.id;state.filters={};state.visitDraft=null;}populateProfiles();if(!editing)location.hash='#/home';}
       if(request===state.formRequest){$('record-dialog').close();state.editing=null;}render();toast(editing?'Изменение сохранено. Прежние значения доступны в истории.':'Запись сохранена зашифрованной.');
+      if(!editing&&type==='document')api.onDocumentSaved?.(parsed.record);
     }catch(error){if(generation===state.generation){if(request===state.formRequest)$('record-error').textContent=error.message||'Не удалось сохранить запись.';else toast(error.message||'Не удалось сохранить прежнюю запись.');}}
     finally{button.disabled=false;if(generation===state.generation)state.busy=false;}
   });

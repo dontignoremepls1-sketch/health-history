@@ -6,7 +6,7 @@ Website: https://dontignoremepls1-sketch.github.io/health-history/
 
 The public repository contains only neutral application resources and encrypted records/documents. The password, private source and original clinical files are not included.
 
-The app supports separate profiles, problem statuses and audit history, latest results and trends, document review, medication and symptom journals, consultation summaries and encrypted backups. PDF extraction and OCR run locally with self-hosted dependencies and their licenses.
+The app supports separate profiles, problem statuses and audit history, latest results and trends, document review, medication and symptom journals, consultation summaries and encrypted backups. Large lists use compact pages; pinned user priorities and contextual creation keep daily work focused. Binary backup containers retain encrypted document bytes without a giant base64 JSON file; legacy JSON backups remain readable. PDF extraction and OCR run locally with self-hosted dependencies and their licenses.
 
 Genetic results have a separate searchable section. Provider statements, raw variant reviews, clinical interpretation and collection coverage retain distinct provenance. Complete and partial captures are counted separately. Saved provider text opens from its record through a bounded on-demand gzip reader; raw DNA exports remain download-only. Genetic risk labels do not create confirmed diagnoses. Original compressed exports are available as decrypted downloads after unlocking.
 
